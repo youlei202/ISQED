@@ -33,6 +33,26 @@ The framework decouples the mathematical auditing logic from the underlying mode
 ### Directory Structure
 ```text
 .
+ISQED-Prototype/
+│
+├── data/                    # All data goes here
+│   ├── raw/                 # Immutable original data (e.g., SST-2 dataset)
+│   └── processed/           # Data after preprocessing (e.g., tokenized text)
+│
+├── notebooks/               # Jupyter Notebooks for exploration & plotting
+│   ├── 01_scaling_law.ipynb       # Generates Figure 2
+│   ├── 02_saturation.ipynb        # Generates Figure 4
+│   ├── 03_shapley_paradox.ipynb   # Generates Figure 3
+│   └── 04_bert_case_study.ipynb   # Real-world analysis
+│
+├── results/                 # All outputs go here
+│   ├── figures/             # Final images for the paper (.pdf, .svg, .png)
+│   │   ├── fig2_scaling.pdf
+│   │   └── fig4_saturation.pdf
+│   ├── tables/              # Generated LaTeX tables or CSVs
+│   │   └── metric_summary.csv
+│   └── logs/                # Raw experiment logs (json/yaml)
+│
 ├── isqed/
 │   ├── core.py          # Abstract Base Classes (ModelUnit, Intervention)
 │   ├── geometry.py      # Convex optimization solver (DISCO algorithm)
@@ -40,13 +60,16 @@ The framework decouples the mathematical auditing logic from the underlying mode
 │   ├── synthetic.py     # Synthetic environments (Linear Structural Models)
 │   ├── real_world.py    # Adapters for HuggingFace Transformers
 │   └── auditing.py      # Implementation of Active vs. Passive auditing strategies
+|
 ├── experiments/
 │   ├── exp1_scaling_law.py    # Reproduces Figure 2: Active Auditing Efficiency
 │   ├── exp2_saturation.py     # Reproduces Figure 4: Ecosystem Saturation
 │   ├── exp3_shapley.py        # Reproduces Figure 3: Shapley vs. PIER
 │   └── exp4_bert_audit.py     # Real-world case study on BERT ecosystem
+|
 ├── requirements.txt
 └── README.md
+└── .gitignore               # Ignore data/ and results/ logs
 ```
 
 ## 🚀 Installation
