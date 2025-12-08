@@ -192,8 +192,8 @@ def run_multicontext_experiment(
     features_df = compute_sentence_features(all_sentences, ref_model)
 
     # Dose design: low doses for P_fit, high doses for P_eval
-    doses_fit = np.linspace(0.0, 0.3, 4)    # e.g. [0.0, 0.1, 0.2, 0.3]
-    doses_eval = np.linspace(0.4, 0.88, 5)  # e.g. [0.4, 0.52, 0.64, 0.76, 0.88]
+    doses_fit = np.linspace(0.0, 0.3, 4)    # not overlap with eval
+    doses_eval = np.linspace(0.4, 0.9, 6)  
 
     print(f"P_fit doses (low):  {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")

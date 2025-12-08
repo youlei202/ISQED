@@ -137,8 +137,8 @@ def run_bert_experiment():
 
     print(f"Total sentences: {n_total}, fit: {len(fit_texts)}, eval: {len(eval_texts)}")
 
-    doses_fit = np.linspace(0.0, 0.3, 4)    # e.g. [0.0, 0.1, 0.2, 0.3]
-    doses_eval = np.linspace(0.4, 0.88, 5)  # e.g. [0.4, 0.52, 0.64, 0.76, 0.88]
+    doses_fit = np.linspace(0.0, 0.3, 4)    # not overlap with eval
+    doses_eval = np.linspace(0.4, 0.9, 6)   
 
     print(f"P_fit doses (low):  {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")
