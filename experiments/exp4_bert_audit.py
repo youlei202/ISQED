@@ -17,7 +17,7 @@ from isqed.geometry import DISCOSolver
 def run_cross_audit_dual_mode():
     print("--- Running Exp 5: Full Ecosystem Dual-Mode Audit (DISCO Standard) ---")
     
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
     # =========================================================================
@@ -68,8 +68,8 @@ def run_cross_audit_dual_mode():
 
     print(f"Total sentences: {n_total}, fit: {len(fit_texts)}, eval: {len(eval_texts)}")
 
-    doses_fit = np.linspace(0.0, 0.3, 4)
-    doses_eval = np.linspace(0.4, 0.88, 5)
+    doses_fit = np.linspace(0.0, 0.3, 8)
+    doses_eval = np.linspace(0.4, 0.9, 6)
 
     print(f"P_fit doses (low): {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")

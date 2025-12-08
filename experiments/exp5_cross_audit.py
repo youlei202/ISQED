@@ -18,7 +18,7 @@ from isqed.geometry import DISCOSolver
 def run_cross_audit_dual_mode():
     print("--- Running Exp 5: Full Ecosystem Dual-Mode Audit (DISCO Standard) ---")
     
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
     # =========================================================================
