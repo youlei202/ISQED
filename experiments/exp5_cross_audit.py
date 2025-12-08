@@ -10,26 +10,10 @@ import torch
 import copy
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from isqed.real_world import HuggingFaceWrapper, Intervention
+from isqed.real_world import HuggingFaceWrapper, MaskingIntervention
 from isqed.geometry import DISCOSolver
 
-# --- Helper: Deterministic Intervention (Re-defined for completeness) ---
-class DeterministicMasking(Intervention):
-    def __init__(self, mask_token="[MASK]"):
-        self.mask_token = mask_token
 
-    def apply(self, text, theta, seed=None):
-        if seed is not None:
-            rng = np.random.RandomState(seed)
-        else:
-            rng = np.random
-        words = text.split()
-        n_mask = int(len(words) * theta)
-        if n_mask > 0:
-            mask_idx = rng.choice(len(words), n_mask, replace=False)
-            for i in mask_idx:
-                words[i] = self.mask_token
-        return " ".join(words)
 
 def run_cross_audit_dual_mode():
     print("--- Running Exp 5: Full Ecosystem Dual-Mode Audit (DISCO Standard) ---")
@@ -64,16 +48,14 @@ def run_cross_audit_dual_mode():
     # =========================================================================
     # 3. Data and Dose Design (P_fit vs P_eval) - Using your structure
     # =========================================================================
-    intervention = DeterministicMasking()
+    intervention = MaskingIntervention()
 
     print("Loading SST-2 validation data...")
-    try:
-        dataset = load_dataset("glue", "sst2", split="validation")
-        all_sentences = dataset["sentence"]
-        max_samples = 200
-        all_sentences = all_sentences[:max_samples]
-    except:
-        all_sentences = ["This sentence is a test sentence"] * 200
+
+    dataset = load_dataset("glue", "sst2", split="validation")
+    all_sentences = dataset["sentence"]
+    max_samples = 200
+    all_sentences = all_sentences[:max_samples]
 
     rng = np.random.RandomState(0)
     all_sentences = np.array(all_sentences)
@@ -85,8 +67,8 @@ def run_cross_audit_dual_mode():
 
     print(f"Total sentences: {n_total}, fit: {len(fit_texts)}, eval: {len(eval_texts)}")
 
-    doses_fit = np.linspace(0.0, 0.3, 4)
-    doses_eval = np.linspace(0.4, 0.88, 5)
+    doses_fit = np.linspace(0.0, 0.3, 8)
+    doses_eval = np.linspace(0.4, 0.9, 6)
 
     print(f"P_fit doses (low): {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")
