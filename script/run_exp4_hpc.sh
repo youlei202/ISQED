@@ -5,7 +5,7 @@
 #!/bin/bash
 ### General options
 ### –- specify queue --
-#BSUB -q hpc
+#BSUB -q gpua100
 ### -- set the job Name --
 #BSUB -J bert_audit_exp4
 ### -- ask for number of cores (default: 1) --
