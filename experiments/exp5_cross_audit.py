@@ -95,8 +95,8 @@ def run_cross_audit_dual_mode():
     print(f"Total sentences: {n_total}, fit: {len(fit_texts)}, eval: {len(eval_texts)}")
 
     # Dose design: low doses for P_fit, high doses for P_eval
-    doses_fit = np.linspace(0.0, 0.3, 4)    # not overlap with eval
-    doses_eval = np.linspace(0.4, 0.9, 6)   
+    doses_fit = np.linspace(0.0, 0.4, 10)    # not overlap with eval
+    doses_eval = np.linspace(0.4, 0.9, 10)   
 
     print(f"P_fit doses (low):  {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")
