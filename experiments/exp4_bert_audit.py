@@ -2,7 +2,7 @@
 #
 # In-silico ecosystem audit on SST-2 with a DISCO-style dose-splitting design:
 # - P_fit: low-dose masking (θ in [0.0, 0.3]) used to learn convex peer weights
-# - P_eval: high-dose masking (θ in [0.4, 0.7]) used to evaluate PIER
+# - P_eval: high-dose masking (θ in [0.4, 0.88]) used to evaluate PIER
 #
 # For each target model, we:
 #   1) Collect a batch of (text, low-dose) responses from target and peers
@@ -17,21 +17,23 @@ from tqdm import tqdm
 from datasets import load_dataset
 import torch
 
+# Ensure we can import the local `isqed` package
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from isqed.real_world import HuggingFaceWrapper, MaskingIntervention
 from isqed.geometry import DISCOSolver
-
+from isqed.ecosystem import Ecosystem
 
 
 def run_bert_experiment():
-    print("--- Running Exp 4 (DISCO-style BERT Ecosystem Audit) ---")
+    print("--- Running Exp 4 (DISCO-style BERT Ecosystem Audit, via Ecosystem) ---")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # =========================================================================
-    # 1. Define the Peer Ecosystem
-    # =========================================================================
+    # =====================================================================
+    # 1. Define the peer ecosystem
+    # =====================================================================
     peer_ids = [
         "textattack/bert-base-uncased-SST-2",
         "textattack/distilbert-base-uncased-SST-2",  # will also be used as a redundant target
@@ -40,7 +42,7 @@ def run_bert_experiment():
     ]
 
     peers = []
-    print("Loading Peers...")
+    print("Loading peers...")
     for pid in peer_ids:
         try:
             model = HuggingFaceWrapper(pid, device)
@@ -53,64 +55,66 @@ def run_bert_experiment():
         print("No peers loaded. Abort.")
         return
 
-    # =========================================================================
-    # 2. Define Targets
-    # =========================================================================
+    # =====================================================================
+    # 2. Define targets
+    # =====================================================================
     targets = []
 
-    # Case A: RoBERTa (as a divergent architecture)
+    # Case A: RoBERTa (architectural divergence)
     try:
         roberta = HuggingFaceWrapper("textattack/roberta-base-SST-2", device)
-        targets.append({
-            "model": roberta,
-            "name": "Architectural Divergence (RoBERTa)",
-            "type": "Low Redundancy"
-        })
+        targets.append(
+            {
+                "model": roberta,
+                "name": "Architectural Divergence (RoBERTa)",
+                "type": "Low Redundancy",
+            }
+        )
     except Exception as e:
         print(f"Warning: RoBERTa failed to load: {e}")
 
-    # Case B: DistilBERT (redundant clone of peer)
-    distil_ref = next((p for p in peers if "distilbert" in p.name), None)
+    # Case B: DistilBERT clone (exact peer)
+    distil_ref = next((p for p in peers if "distilbert" in p.name.lower()), None)
     if distil_ref:
-        targets.append({
-            "model": distil_ref,
-            "name": "Perfect Redundancy (Clone)",
-            "type": "High Redundancy",
-            "clone_of_peer_idx": peers.index(distil_ref)
-        })
+        targets.append(
+            {
+                "model": distil_ref,
+                "name": "Perfect Redundancy (Clone)",
+                "type": "High Redundancy",
+                "clone_of_peer_idx": peers.index(distil_ref),
+            }
+        )
     else:
         print("Warning: No DistilBERT peer found for redundant target.")
 
-    # Case C: DistilBERT variant (with different fine-tuning)
+    # Case C: DistilBERT variant (different fine-tuning)
     try:
         near_distil = HuggingFaceWrapper(
-            "distilbert-base-uncased-finetuned-sst-2-english",  # a different fine-tuned DistilBERT
-            device
+            "distilbert-base-uncased-finetuned-sst-2-english", device
         )
-        targets.append({
-            "model": near_distil,
-            "name": "Parametric Divergence (Variant)",
-            "type": "Uniqueness"
-            # No clone_of_peer_idx since not identical to peer
-        })
+        targets.append(
+            {
+                "model": near_distil,
+                "name": "Parametric Divergence (Variant)",
+                "type": "Uniqueness",
+            }
+        )
     except Exception as e:
-        print(f"Warning: near‑redundant DistilBERT failed to load: {e}")
-
+        print(f"Warning: near-redundant DistilBERT failed to load: {e}")
 
     if not targets:
         print("No targets loaded. Abort.")
         return
 
-    # =========================================================================
-    # 3. Data and Dose Design (P_fit vs P_eval)
-    # =========================================================================
+    # =====================================================================
+    # 3. Data and dose design (P_fit vs P_eval)
+    # =====================================================================
     intervention = MaskingIntervention()
 
     print("Loading SST-2 validation data...")
     try:
         dataset = load_dataset("glue", "sst2", split="validation")
         all_sentences = dataset["sentence"]
-        # Use a reasonably sized subset for the demo
         max_samples = 200
         all_sentences = all_sentences[:max_samples]
     except Exception as e:
@@ -123,7 +127,6 @@ def run_bert_experiment():
             "Amazing direction and visuals.",
         ] * 40  # 200 sentences
 
-    # Shuffle and split into fit vs eval texts
     rng = np.random.RandomState(0)
     all_sentences = np.array(all_sentences)
     rng.shuffle(all_sentences)
@@ -134,18 +137,15 @@ def run_bert_experiment():
 
     print(f"Total sentences: {n_total}, fit: {len(fit_texts)}, eval: {len(eval_texts)}")
 
-    # Dose splitting:
-    #   - low-dose (P_fit): used to learn convex peer baseline
-    #   - high-dose (P_eval): used to evaluate PIER
-    doses_fit = np.linspace(0.0, 0.3, 4)   # e.g. [0.0, 0.1, 0.2, 0.3]
-    doses_eval = np.linspace(0.4, 0.88, 5)  # e.g. [0.4, 0.5, 0.6, 0.7]
+    doses_fit = np.linspace(0.0, 0.3, 4)    # e.g. [0.0, 0.1, 0.2, 0.3]
+    doses_eval = np.linspace(0.4, 0.88, 5)  # e.g. [0.4, 0.52, 0.64, 0.76, 0.88]
 
     print(f"P_fit doses (low):  {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")
 
-    # =========================================================================
-    # 4. Main Loop: DISCO-style audit per target
-    # =========================================================================
+    # =====================================================================
+    # 4. Main loop: DISCO-style audit per target (via Ecosystem)
+    # =====================================================================
     all_results = []
 
     for t_info in targets:
@@ -153,50 +153,62 @@ def run_bert_experiment():
         t_model = t_info["model"]
         print(f"\n>>> Auditing target: {t_name}")
 
+        # Build an Ecosystem object where the target is audited against all peers
+        eco = Ecosystem(target=t_model, peers=peers)
+
         # -------------------------------------------------
         # 4.1 Fit phase: learn a global convex baseline on P_fit
         # -------------------------------------------------
-        y_t_fit_list = []
-        Y_p_fit_list = []
-
         print("  [Phase] Fitting convex baseline on low-dose interventions (P_fit)...")
-        for text in tqdm(fit_texts, desc="    Fit texts", leave=False):
+
+        fit_X = []
+        fit_Theta = []
+        fit_seeds = []
+
+        for text in fit_texts:
             for theta in doses_fit:
-                # Deterministic intervention across models
                 seed = abs(hash((text, float(theta)))) % (2**32)
-                perturbed_text = intervention.apply(text, theta, seed=seed)
+                fit_X.append(text)
+                fit_Theta.append(float(theta))
+                fit_seeds.append(int(seed))
 
-                # Query target
-                y_t = t_model._forward(perturbed_text)
+        if not fit_X:
+            print("  [WARN] No fit samples for this target. Skipping.")
+            continue
 
-                # Query peers
-                y_ps = [p._forward(perturbed_text) for p in peers]
+        # Query target and peers jointly via Ecosystem
+        y_t_fit, Y_p_fit = eco.batched_query(
+            X=fit_X,
+            Thetas=fit_Theta,
+            intervention=intervention,
+            seeds=fit_seeds,
+        )
 
-                # Optional sanity check for clone target
-                if "clone_of_peer_idx" in t_info:
-                    p_idx = t_info["clone_of_peer_idx"]
-                    diff = float(abs(y_t - y_ps[p_idx]))
-                    if diff > 1e-9:
-                        print(f"    [ALARM] Clone mismatch on P_fit! Diff: {diff:.3e}")
+        # Optional sanity check for clone target on P_fit
+        if "clone_of_peer_idx" in t_info:
+            clone_idx = t_info["clone_of_peer_idx"]
+            diffs = np.abs(y_t_fit - Y_p_fit[:, clone_idx])
+            max_diff = float(np.max(diffs))
+            if max_diff > 1e-9:
+                print(
+                    f"  [ALARM] Clone mismatch on P_fit for {t_name}! "
+                    f"Max diff: {max_diff:.3e}"
+                )
 
-                y_t_fit_list.append(y_t)
-                Y_p_fit_list.append(y_ps)
+        # Prepare data for DISCOSolver
+        y_t_fit_vec = y_t_fit.reshape(-1, 1)  # (m_fit, 1)
+        Y_p_fit_mat = Y_p_fit                 # (m_fit, N_peers)
 
-        y_t_fit_vec = np.array(y_t_fit_list, dtype=float)  # (m_fit,)
-        Y_p_fit_mat = np.array(Y_p_fit_list, dtype=float)  # (m_fit, N_peers)
-        if y_t_fit_vec.ndim == 1:
-            y_t_fit_vec = y_t_fit_vec.reshape(-1, 1)       # (m_fit, 1) if solver expects column
-
-        # Solve for a single convex weight vector w_hat on P_fit
         try:
             dist_fit, w_hat = DISCOSolver.solve_weights_and_distance(
-                y_t_fit_vec, Y_p_fit_mat
+                y_t_fit_vec,
+                Y_p_fit_mat,
             )
         except Exception as e:
             print(f"  [ERROR] DISCOSolver failed during fit phase for {t_name}: {e}")
             continue
 
-        w_hat = np.array(w_hat, dtype=float).flatten()
+        w_hat = np.asarray(w_hat, dtype=float).flatten()
         if w_hat.shape[0] != len(peers):
             print(f"  [WARN] w_hat length {w_hat.shape[0]} != num_peers {len(peers)}")
 
@@ -206,35 +218,52 @@ def run_bert_experiment():
         # 4.2 Evaluation phase: compute PIER on P_eval using fixed w_hat
         # -------------------------------------------------
         print("  [Phase] Evaluating PIER on high-dose interventions (P_eval)...")
-        for theta in tqdm(doses_eval, desc="    Eval doses", leave=False):
-            dose_piers = []
 
-            for text in eval_texts:
+        eval_X = []
+        eval_Theta = []
+        eval_seeds = []
+
+        for text in eval_texts:
+            for theta in doses_eval:
                 seed = abs(hash((text, float(theta)))) % (2**32)
-                perturbed_text = intervention.apply(text, theta, seed=seed)
+                eval_X.append(text)
+                eval_Theta.append(float(theta))
+                eval_seeds.append(int(seed))
 
-                # Target output
-                y_t = t_model._forward(perturbed_text)
+        if not eval_X:
+            print("  [WARN] No eval samples for this target. Skipping P_eval.")
+            continue
 
-                # Peer outputs
-                y_ps = np.array([p._forward(perturbed_text) for p in peers], dtype=float)
+        y_t_eval, Y_p_eval = eco.batched_query(
+            X=eval_X,
+            Thetas=eval_Theta,
+            intervention=intervention,
+            seeds=eval_seeds,
+        )
 
-                # Optional sanity check for clone target on P_eval
-                if "clone_of_peer_idx" in t_info:
-                    p_idx = t_info["clone_of_peer_idx"]
-                    diff = float(abs(y_t - y_ps[p_idx]))
-                    if diff > 1e-9:
-                        print(f"    [ALARM] Clone mismatch on P_eval! Diff: {diff:.3e}")
+        eval_Theta_arr = np.asarray(eval_Theta, dtype=float)
+        y_mix_eval = Y_p_eval @ w_hat
+        residuals_all = np.abs(y_t_eval - y_mix_eval)
 
-                # Convex baseline using fixed w_hat
-                y_mix = float(np.dot(w_hat, y_ps))
-                pier = float(abs(y_t - y_mix))
-                dose_piers.append(pier)
+        # Optional sanity check for clone target on P_eval
+        if "clone_of_peer_idx" in t_info:
+            clone_idx = t_info["clone_of_peer_idx"]
+            clone_diffs = np.abs(y_t_eval - Y_p_eval[:, clone_idx])
+            max_diff_eval = float(np.max(clone_diffs))
+            if max_diff_eval > 1e-9:
+                print(
+                    f"  [ALARM] Clone mismatch on P_eval for {t_name}! "
+                    f"Max diff: {max_diff_eval:.3e}"
+                )
 
-            if dose_piers:
-                avg_pier = float(np.mean(dose_piers))
-            else:
+        # Aggregate PIER per dose
+        for theta in doses_eval:
+            mask = np.isclose(eval_Theta_arr, float(theta), atol=1e-8)
+            vals = residuals_all[mask]
+            if vals.size == 0:
                 avg_pier = float("nan")
+            else:
+                avg_pier = float(np.mean(vals))
 
             all_results.append(
                 {
@@ -245,9 +274,9 @@ def run_bert_experiment():
                 }
             )
 
-    # =========================================================================
+    # =====================================================================
     # 5. Save results
-    # =========================================================================
+    # =====================================================================
     df = pd.DataFrame(all_results)
     output_dir = "results/tables"
     os.makedirs(output_dir, exist_ok=True)
