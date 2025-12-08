@@ -1,4 +1,16 @@
 # experiments/exp5_cross_audit.py
+#
+# Cross-audit of the full BERT ecosystem with a dual-mode DISCO design:
+#   - Mode 1 (Uniqueness): target vs. "rest of ecosystem" peers (size N-1)
+#   - Mode 2 (Redundancy): target vs. "full ecosystem" peers (size N)
+#
+# For each target model, we:
+#   1) Learn w_rest on P_fit (low doses) using peers_rest
+#   2) Learn w_full on P_fit (low doses) using peers_full
+#   3) On P_eval (high doses), compute residuals under both baselines:
+#        R_rest(x, θ)  = |Y_t - sum_j w_rest[j] * Y_j|
+#        R_full(x, θ)  = |Y_t - sum_j w_full[j] * Y_j|
+#   4) Save full residual vectors (no aggregation) for downstream heatmaps.
 
 import sys
 import os
@@ -7,55 +19,70 @@ import pandas as pd
 from tqdm import tqdm
 from datasets import load_dataset
 import torch
-import copy
 
+# Ensure we can import the local `isqed` package
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from isqed.real_world import HuggingFaceWrapper, MaskingIntervention
 from isqed.geometry import DISCOSolver
-
+from isqed.ecosystem import Ecosystem
 
 
 def run_cross_audit_dual_mode():
-    print("--- Running Exp 5: Full Ecosystem Dual-Mode Audit (DISCO Standard) ---")
-    
+    print("--- Running Exp 5: Full Ecosystem Dual-Mode Audit (DISCO Standard, via Ecosystem) ---")
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
-    
-    # =========================================================================
-    # 1. Define Models
-    # =========================================================================
+
+    # =====================================================================
+    # 1. Define ecosystem models
+    # =====================================================================
     model_ids = [
-        "textattack/bert-base-uncased-SST-2", "textattack/distilbert-base-uncased-SST-2",
-        "textattack/roberta-base-SST-2", "textattack/albert-base-v2-SST-2",
-        "textattack/xlnet-base-cased-SST-2"
+        "textattack/bert-base-uncased-SST-2",
+        "textattack/distilbert-base-uncased-SST-2",
+        "textattack/roberta-base-SST-2",
+        "textattack/albert-base-v2-SST-2",
+        "textattack/xlnet-base-cased-SST-2",
     ]
     short_names = ["BERT", "DistilBERT", "RoBERTa", "ALBERT", "XLNet"]
-    
-    original_models = []
-    print("Loading Core Ecosystem Models...")
+
+    models = []
+    print("Loading core ecosystem models...")
     for pid in model_ids:
         try:
             m = HuggingFaceWrapper(pid, device)
-            original_models.append(m)
+            models.append(m)
+            print(f"  [OK] Loaded: {pid}")
         except Exception as e:
             print(f"  [FAIL] Skipping {pid}: {e}")
-            
-    n = len(original_models)
+
+    n = len(models)
     if n < 3:
         print("Less than 3 models loaded. Aborting experiment.")
         return
 
-    # =========================================================================
-    # 3. Data and Dose Design (P_fit vs P_eval) - Using your structure
-    # =========================================================================
+    short_names = short_names[:n]
+
+    # =====================================================================
+    # 2. Data and dose design (P_fit vs P_eval)
+    # =====================================================================
     intervention = MaskingIntervention()
 
     print("Loading SST-2 validation data...")
-
-    dataset = load_dataset("glue", "sst2", split="validation")
-    all_sentences = dataset["sentence"]
-    max_samples = 200
-    all_sentences = all_sentences[:max_samples]
+    try:
+        dataset = load_dataset("glue", "sst2", split="validation")
+        all_sentences = dataset["sentence"]
+        max_samples = 200
+        all_sentences = all_sentences[:max_samples]
+    except Exception as e:
+        print(f"  [WARN] Failed to load SST-2 from HF: {e}")
+        all_sentences = [
+            "This movie is great.",
+            "Terrible acting.",
+            "I loved it.",
+            "The plot was boring.",
+            "Amazing direction and visuals.",
+        ] * 40
 
     rng = np.random.RandomState(0)
     all_sentences = np.array(all_sentences)
@@ -67,120 +94,182 @@ def run_cross_audit_dual_mode():
 
     print(f"Total sentences: {n_total}, fit: {len(fit_texts)}, eval: {len(eval_texts)}")
 
-    doses_fit = np.linspace(0.0, 0.3, 8)
-    doses_eval = np.linspace(0.4, 0.9, 6)
+    # Dose design: low doses for P_fit, high doses for P_eval
+    doses_fit = np.linspace(0.0, 0.3, 4)    # not overlap with eval
+    doses_eval = np.linspace(0.4, 0.9, 6)   
 
-    print(f"P_fit doses (low): {doses_fit}")
+    print(f"P_fit doses (low):  {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")
 
-    # =========================================================================
-    # 4. Main Loop: DISCO-style Dual Audit
-    # =========================================================================
-    
-    # Store residuals for the final heatmap visualization (rows = samples*doses, cols = targets*modes)
-    final_residual_data = pd.DataFrame()
-    
-    # Generate the sample index column based on P_eval length (required for the final heatmap)
+    # =====================================================================
+    # 3. Prepare index for the final residual DataFrame
+    # =====================================================================
+    # We will store one row per (eval_text, dose_eval) pair.
     n_eval_points = len(eval_texts) * len(doses_eval)
     eval_index = []
     for i in range(len(eval_texts)):
-        for j in range(len(doses_eval)):
-            eval_index.append(f"Sample {i+1} $\\theta={doses_eval[j]:.2f}$")
-            
-    final_residual_data['Eval_Point'] = eval_index
+        for j, theta in enumerate(doses_eval):
+            eval_index.append(f"Sample {i+1} $\\theta={theta:.2f}$")
 
+    final_residual_data = pd.DataFrame()
+    final_residual_data["Eval_Point"] = eval_index
 
+    # =====================================================================
+    # 4. Main loop: dual-mode DISCO per target
+    # =====================================================================
     for i in range(n):
-        target_model = original_models[i]
+        target_model = models[i]
         target_name = short_names[i]
-        
-        # --- Define Peer Sets for this Target ---
-        
-        # Peer Set 1 (Rest of Ecosystem, size N-1)
-        peers_rest = [original_models[j] for j in range(n) if i != j]
-        
-        # Peer Set 2 (Full Ecosystem, size N)
-        peers_full = original_models
-        
+
         print(f"\n>>> Auditing target: {target_name}")
 
-        
-        # --- 4.1 FIT PHASE (Learn w_hat) ---
-        y_t_fit_list = []
-        Y_p_fit_rest_list = []
-        Y_p_fit_full_list = []
+        # Peer set 1: rest of ecosystem (size N-1)
+        peers_rest = [models[j] for j in range(n) if j != i]
+        # Peer set 2: full ecosystem (size N)
+        peers_full = models
 
-        print("  [Phase] Fitting convex baseline on low-dose interventions (P_fit)...")
-        
-        # Collect data for fitting the two weight vectors (w_rest and w_full)
-        for text in tqdm(fit_texts, desc="    Fit texts"):
+        # Ecosystem views for the two modes
+        eco_rest = Ecosystem(target=target_model, peers=peers_rest)
+        eco_full = Ecosystem(target=target_model, peers=peers_full)
+
+        # -------------------------------------------------
+        # 4.1 FIT phase: learn w_hat_rest and w_hat_full on P_fit
+        # -------------------------------------------------
+        print("  [Phase] Fitting convex baselines on low-dose interventions (P_fit)...")
+
+        fit_X = []
+        fit_Theta = []
+        fit_seeds = []
+
+        # Build a shared batch of (text, theta, seed) for both ecosystems
+        for text in fit_texts:
             for theta in doses_fit:
                 seed = abs(hash((text, float(theta)))) % (2**32)
-                perturbed_text = intervention.apply(text, theta, seed=seed)
-                
-                y_t = target_model._forward(perturbed_text)
-                
-                # Query peers for both modes
-                y_ps_rest = [p._forward(perturbed_text) for p in peers_rest]
-                y_ps_full = [p._forward(perturbed_text) for p in peers_full]
-                
-                y_t_fit_list.append(y_t)
-                Y_p_fit_rest_list.append(y_ps_rest)
-                Y_p_fit_full_list.append(y_ps_full)
+                fit_X.append(text)
+                fit_Theta.append(float(theta))
+                fit_seeds.append(int(seed))
 
+        if not fit_X:
+            print("  [WARN] No fit samples for this target. Skipping.")
+            continue
 
-        y_t_fit_vec = np.array(y_t_fit_list, dtype=float) 
-        if y_t_fit_vec.ndim == 1: y_t_fit_vec = y_t_fit_vec.reshape(-1, 1) 
-        
-        # Solve W_hat_rest (Mode 1: Uniqueness)
-        Y_p_fit_rest_mat = np.array(Y_p_fit_rest_list, dtype=float) 
-        _, w_hat_rest = DISCOSolver.solve_weights_and_distance(y_t_fit_vec, Y_p_fit_rest_mat)
-        
-        # Solve W_hat_full (Mode 2: Redundancy)
-        Y_p_fit_full_mat = np.array(Y_p_fit_full_list, dtype=float) 
-        _, w_hat_full = DISCOSolver.solve_weights_and_distance(y_t_fit_vec, Y_p_fit_full_mat)
+        # Query target + peers_rest
+        y_t_fit_rest, Y_p_fit_rest = eco_rest.batched_query(
+            X=fit_X,
+            Thetas=fit_Theta,
+            intervention=intervention,
+            seeds=fit_seeds,
+        )
+        # Query target + peers_full
+        y_t_fit_full, Y_p_fit_full = eco_full.batched_query(
+            X=fit_X,
+            Thetas=fit_Theta,
+            intervention=intervention,
+            seeds=fit_seeds,
+        )
 
-        print(f"  [Fit] Learned w_rest for {target_name}: {w_hat_rest.flatten()[:2]}...")
-        print(f"  [Fit] Learned w_full for {target_name}: {w_hat_full.flatten()[:2]}...")
+        # Sanity check: target outputs must coincide across the two ecosystems
+        max_target_diff = float(np.max(np.abs(y_t_fit_rest - y_t_fit_full)))
+        if max_target_diff > 1e-9:
+            print(
+                f"  [WARN] Target outputs differ between rest/full ecosystems "
+                f"on P_fit for {target_name}: max diff={max_target_diff:.3e}"
+            )
+        # Use the rest version as the canonical target outputs
+        y_t_fit = y_t_fit_rest
 
-        # --- 4.2 EVAL PHASE (Compute Residuals) ---
-        
-        r_uniqueness_list = []
-        r_redundancy_list = []
+        # Prepare inputs for DISCOSolver
+        y_t_fit_vec = y_t_fit.reshape(-1, 1)
 
-        print("  [Phase] Evaluating PIER on high-dose interventions (P_eval)...")
-        
-        for text in tqdm(eval_texts, desc="    Eval texts"):
+        # Solve w_hat_rest (Mode 1: Uniqueness)
+        Y_p_fit_rest_mat = Y_p_fit_rest
+        _, w_hat_rest = DISCOSolver.solve_weights_and_distance(
+            y_t_fit_vec,
+            Y_p_fit_rest_mat,
+        )
+        w_hat_rest = np.asarray(w_hat_rest, dtype=float).flatten()
+
+        # Solve w_hat_full (Mode 2: Redundancy)
+        Y_p_fit_full_mat = Y_p_fit_full
+        _, w_hat_full = DISCOSolver.solve_weights_and_distance(
+            y_t_fit_vec,
+            Y_p_fit_full_mat,
+        )
+        w_hat_full = np.asarray(w_hat_full, dtype=float).flatten()
+
+        print(f"  [Fit] Learned w_rest for {target_name}: {w_hat_rest[:2]}...")
+        print(f"  [Fit] Learned w_full for {target_name}: {w_hat_full[:2]}...")
+
+        # -------------------------------------------------
+        # 4.2 EVAL phase: compute residuals on P_eval
+        # -------------------------------------------------
+        print("  [Phase] Evaluating residuals on high-dose interventions (P_eval)...")
+
+        eval_X = []
+        eval_Theta = []
+        eval_seeds = []
+
+        for text in eval_texts:
             for theta in doses_eval:
                 seed = abs(hash((text, float(theta)))) % (2**32)
-                perturbed_text = intervention.apply(text, theta, seed=seed)
+                eval_X.append(text)
+                eval_Theta.append(float(theta))
+                eval_seeds.append(int(seed))
 
-                # Query Target (y_t is the same for both modes)
-                y_t = target_model._forward(perturbed_text)
+        if not eval_X:
+            print("  [WARN] No eval samples for this target. Skipping P_eval.")
+            continue
 
-                # Query Peers (y_ps_rest and y_ps_full)
-                y_ps_rest = np.array([p._forward(perturbed_text) for p in peers_rest], dtype=float)
-                y_ps_full = np.array([p._forward(perturbed_text) for p in peers_full], dtype=float)
-                
-                # Mode 1: Residual R_rest using FIXED w_hat_rest
-                y_mix_rest = np.dot(w_hat_rest.flatten(), y_ps_rest)
-                r_uniqueness_list.append(float(np.abs(y_t - y_mix_rest)))
+        # Query using the two ecosystems on the same perturbed inputs
+        y_t_eval_rest, Y_p_eval_rest = eco_rest.batched_query(
+            X=eval_X,
+            Thetas=eval_Theta,
+            intervention=intervention,
+            seeds=eval_seeds,
+        )
+        y_t_eval_full, Y_p_eval_full = eco_full.batched_query(
+            X=eval_X,
+            Thetas=eval_Theta,
+            intervention=intervention,
+            seeds=eval_seeds,
+        )
 
-                # Mode 2: Residual R_full using FIXED w_hat_full
-                y_mix_full = np.dot(w_hat_full.flatten(), y_ps_full)
-                r_redundancy_list.append(float(np.abs(y_t - y_mix_full)))
+        # Sanity check: target outputs must coincide across the two ecosystems
+        max_target_diff_eval = float(np.max(np.abs(y_t_eval_rest - y_t_eval_full)))
+        if max_target_diff_eval > 1e-9:
+            print(
+                f"  [WARN] Target outputs differ between rest/full ecosystems "
+                f"on P_eval for {target_name}: max diff={max_target_diff_eval:.3e}"
+            )
+        y_t_eval = y_t_eval_rest
 
-        # --- Save Final Residual Vectors (Full N_samples*N_doses) ---
-        final_residual_data[f'{target_name}_Uniqueness_R'] = r_uniqueness_list
-        final_residual_data[f'{target_name}_Redundancy_R'] = r_redundancy_list
+        # Mode 1: Uniqueness residuals (rest peers only)
+        y_mix_rest = Y_p_eval_rest @ w_hat_rest
+        r_uniqueness = np.abs(y_t_eval - y_mix_rest)
 
+        # Mode 2: Redundancy residuals (full peers including target)
+        y_mix_full = Y_p_eval_full @ w_hat_full
+        r_redundancy = np.abs(y_t_eval - y_mix_full)
 
-    # 5. Save
+        # Sanity check on lengths vs pre-built index
+        if r_uniqueness.size != n_eval_points or r_redundancy.size != n_eval_points:
+            print(
+                f"  [WARN] Residual length mismatch for {target_name}: "
+                f"got {r_uniqueness.size} vs expected {n_eval_points}"
+            )
+
+        final_residual_data[f"{target_name}_Uniqueness_R"] = r_uniqueness
+        final_residual_data[f"{target_name}_Redundancy_R"] = r_redundancy
+
+    # =====================================================================
+    # 5. Save results
+    # =====================================================================
     output_dir = "results/tables"
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, "exp5_dual_mode_residuals.csv")
     final_residual_data.to_csv(out_path, index=False)
-    print(f"\nSaved raw residuals data for {n_eval_points} samples to: {out_path}")
+    print(f"\nSaved raw residuals data for {n_eval_points} eval points to: {out_path}")
+
 
 if __name__ == "__main__":
     run_cross_audit_dual_mode()
