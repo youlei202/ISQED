@@ -38,36 +38,8 @@ class HuggingFaceWrapper(ModelUnit):
         # Shape: (1,) scalar
         return probs[0, 1].item()
 
-class MaskingIntervention(Intervention):
-    """
-    Type-B Intervention: Text Masking.
-    Randomly replaces words with [MASK] token based on dose theta.
-    """
-    def __init__(self, mask_token="[MASK]"):
-        self.mask_token = mask_token
-
-    def apply(self, text, theta):
-        """
-        theta: Float between 0.0 (no mask) and 1.0 (all mask).
-        """
-        if theta <= 0.0:
-            return text
-            
-        words = text.split()
-        n_words = len(words)
-        n_mask = int(n_words * theta)
-        
-        if n_mask == 0:
-            return text
-            
-        # Randomly choose indices to mask
-        mask_indices = np.random.choice(n_words, n_mask, replace=False)
-        for idx in mask_indices:
-            words[idx] = self.mask_token
-            
-        return " ".join(words)
     
-class DeterministicMasking(Intervention):
+class MaskingIntervention(Intervention):
     def __init__(self, mask_token: str = "[MASK]"):
         self.mask_token = mask_token
 

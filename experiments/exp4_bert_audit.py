@@ -18,7 +18,7 @@ from datasets import load_dataset
 import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from isqed.real_world import HuggingFaceWrapper, DeterministicMasking
+from isqed.real_world import HuggingFaceWrapper, MaskingIntervention
 from isqed.geometry import DISCOSolver
 
 
@@ -104,7 +104,7 @@ def run_bert_experiment():
     # =========================================================================
     # 3. Data and Dose Design (P_fit vs P_eval)
     # =========================================================================
-    intervention = DeterministicMasking()
+    intervention = MaskingIntervention()
 
     print("Loading SST-2 validation data...")
     try:
