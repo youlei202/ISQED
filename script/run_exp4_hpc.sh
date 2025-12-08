@@ -5,7 +5,7 @@
 #!/bin/bash
 ### General options
 ### –- specify queue --
-#BSUB -q gpua100
+#BSUB -q gpuv100
 ### -- set the job Name --
 #BSUB -J bert_audit_exp4
 ### -- ask for number of cores (default: 1) --
@@ -14,7 +14,7 @@
 #BSUB -gpu "num=1:mode=exclusive_process"
 ### -- set walltime limit: hh:mm -- 
 # Inference is fast, but we set 4 hours to be safe (adjust to 23:59 if queuing is fine)
-#BSUB -W 04:00
+#BSUB -W 02:00
 # request system-memory
 #BSUB -R "rusage[mem=50GB]"
 ### -- set the email address --
