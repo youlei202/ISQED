@@ -43,7 +43,8 @@ ISQED-Prototype/
 │   ├── 01_scaling_law.ipynb       # Generates Figure 2
 │   ├── 02_saturation.ipynb        # Generates Figure 4
 │   ├── 03_shapley_paradox.ipynb   # Generates Figure 3
-│   └── 04_bert_case_study.ipynb   # Real-world analysis
+│   ├── 04_bert_case_study.ipynb   # Real-world analysis
+│   ├── ... 
 │
 ├── results/                 # All outputs go here
 │   ├── figures/             # Final images for the paper (.pdf, .svg, .png)
@@ -65,7 +66,8 @@ ISQED-Prototype/
 │   ├── exp1_scaling_law.py    # Reproduces Figure 2: Active Auditing Efficiency
 │   ├── exp2_saturation.py     # Reproduces Figure 4: Ecosystem Saturation
 │   ├── exp3_shapley.py        # Reproduces Figure 3: Shapley vs. PIER
-│   └── exp4_bert_audit.py     # Real-world case study on BERT ecosystem
+│   ├── exp4_bert_audit.py     # Real-world case study on BERT ecosystem
+|   ├── ...
 |
 ├── requirements.txt
 └── README.md
