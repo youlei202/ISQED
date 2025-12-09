@@ -1,39 +1,39 @@
 # experiments/exp9_routing_sanity_dose05.py
 #
-# Exp 9: Routing-based sanity check at a mid dose (theta = 0.5).
+# Exp 9 (revised): Mid-dose convex-routing sanity check (theta = 0.5).
 #
-# Motivation:
-#   In Exp 6, DistilBERT shows a U-shaped PIER curve: it is highly unique
-#   at low and high doses, but has a *low* PIER around intermediate doses
-#   (e.g., theta ≈ 0.5). In contrast, raw disagreement (Exp 7) tends to
-#   rank DistilBERT as the most "different" model at almost all doses.
+# Goal:
+#   At theta ≈ 0.5, PIER from Exp 6 suggests that DistilBERT is relatively
+#   easy to approximate via a single global convex combination of peers,
+#   whereas ALBERT remains the hardest model to approximate.
 #
-#   This experiment performs a routing-based sanity check at theta = 0.5:
-#   for each target model t, we:
+#   In contrast, simple model differencing (raw disagreement) still ranks
+#   ALBERT and DistilBERT as the most "different" models at this dose.
 #
-#       1) Take all other models as peers P_t.
-#       2) Compute:
-#          - Global disagreement D_t(theta):
-#                D_t = E_x [ mean_j |Y_t(x,theta) - Y_j(x,theta)| ]
-#          - Best single-peer approximation:
-#                MAE_single(t) = min_j E_x [ |Y_t - Y_j| ]
-#          - Oracle router approximation:
-#                MAE_oracle(t) = E_x [ min_j |Y_t(x,theta) - Y_j(x,theta)| ]
+#   This experiment uses a DISCO-style convex router to validate PIER:
+#     For each target model t:
+#       1) Split sentences into P_fit and P_eval.
+#       2) On P_fit (at theta = 0.5), learn a *global* convex weight vector
+#          w_convex(t) using DISCOSolver.
+#       3) On P_eval (dose = 0.5), compute:
+#            - GlobalDisagreement_D      (raw MD baseline)
+#            - MAE_SinglePeer           (best fixed single peer)
+#            - MAE_OracleRouter         (per-sample best peer)
+#            - MAE_ConvexRouter         (fixed convex router with w_convex)
 #
-#   At theta = 0.5, if PIER is correctly capturing "ease of replacement",
-#   we expect that:
-#       - DistilBERT's MAE_oracle is *small* (easy to approximate via peers),
-#         even though its global disagreement D_t is large.
-#       - This contrasts with low- or high-dose regimes where DistilBERT
-#         remains hard to approximate.
+#   If PIER is correct, at theta ≈ 0.5 we expect:
+#       - DistilBERT to have relatively low MAE_ConvexRouter (easy to
+#         approximate via a single convex combination),
+#       - while ALBERT still has a large MAE_ConvexRouter.
 #
-#   This provides a concrete case where model differencing suggests
-#   uniqueness, but PIER (and routing) reveal that the model is in fact
-#   easy to reconstruct using existing peers.
+#   This provides a complementary case to Exp 8: there, even an oracle
+#   router cannot remove ALBERT's low-dose uniqueness; here, a simple
+#   global convex router *can* remove much of DistilBERT's mid-dose
+#   pseudo-uniqueness, in line with PIER.
 
 import sys
 import os
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -45,11 +45,13 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from isqed.real_world import HuggingFaceWrapper, MaskingIntervention
+from isqed.ecosystem import Ecosystem
+from isqed.geometry import DISCOSolver
 
 # Add experiments/ for utils
 this_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(this_dir)
-from experiments.utils import make_stable_seed  
+from experiments.utils import make_stable_seed 
 
 
 def load_sentences_sst2_like_exp7(
@@ -86,27 +88,82 @@ def load_sentences_sst2_like_exp7(
         all_sentences = all_sentences[idx]
     all_sentences = all_sentences.tolist()
 
-    print(f"Using {len(all_sentences)} sentences at dose = 0.5.")
+    print(f"Using {len(all_sentences)} total sentences.")
     return all_sentences
 
 
-def compute_outputs_at_dose(
+def split_fit_eval(
     sentences: List[str],
-    model_ids: List[str],
-    device: str,
-    dose: float = 0.5,
-) -> (List[HuggingFaceWrapper], np.ndarray):
+    np_rng: np.random.RandomState,
+    fit_frac: float = 0.5,
+) -> Tuple[List[str], List[str]]:
     """
-    For each model and each sentence, compute the scalar output at a fixed dose.
+    Deterministically split a list of sentences into P_fit and P_eval.
+    """
+    idx = np.arange(len(sentences))
+    np_rng.shuffle(idx)
+    n_fit = int(len(idx) * fit_frac)
+    fit_idx = idx[:n_fit]
+    eval_idx = idx[n_fit:]
 
-    We route through MaskingIntervention with the given theta and a
-    deterministic seed via make_stable_seed for consistency with Exp 7.
+    fit_texts = [sentences[i] for i in fit_idx]
+    eval_texts = [sentences[i] for i in eval_idx]
+
+    print(f"Split into fit={len(fit_texts)}, eval={len(eval_texts)} sentences.")
+    return fit_texts, eval_texts
+
+
+def build_query_grid(
+    texts: List[str],
+    theta: float,
+) -> Tuple[List[str], List[float], List[int]]:
     """
-    intervention = MaskingIntervention()
+    Build lists (X, Thetas, seeds) for a fixed dose theta.
+    """
+    X = []
+    Thetas = []
+    seeds = []
+    for text in texts:
+        seed = make_stable_seed(text=text, theta=theta)
+        X.append(text)
+        Thetas.append(float(theta))
+        seeds.append(int(seed))
+    return X, Thetas, seeds
+
+
+def run_exp9_routing_sanity_middose(
+    max_samples: int = 1000,
+    dose: float = 0.5,
+    output_filename: str = "exp9_routing_sanity_dose05_convex.csv",
+):
+    print("=== Exp 9 (revised): Mid-dose convex-routing sanity check ===")
+
+    # Seeds aligned with Exp 7
+    np_rng = np.random.RandomState(0)
+    torch.manual_seed(0)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
+    # 1) Load and split sentences
+    all_sentences = load_sentences_sst2_like_exp7(max_samples=max_samples, np_rng=np_rng)
+    fit_texts, eval_texts = split_fit_eval(all_sentences, np_rng=np_rng, fit_frac=0.5)
+
     theta = float(dose)
+    intervention = MaskingIntervention()
+
+    # 2) Load models (same ordering as Exp 7)
+    model_ids = [
+        "textattack/bert-base-uncased-SST-2",
+        "textattack/distilbert-base-uncased-SST-2",
+        "textattack/roberta-base-SST-2",
+        "textattack/albert-base-v2-SST-2",
+        "textattack/xlnet-base-cased-SST-2",
+    ]
+    short_names = ["BERT", "DistilBERT", "RoBERTa", "ALBERT", "XLNet"]
 
     models: List[HuggingFaceWrapper] = []
-    print("Loading models for routing sanity check (mid dose)...")
+    print("Loading ecosystem models...")
     for mid in model_ids:
         try:
             m = HuggingFaceWrapper(mid, device)
@@ -115,63 +172,75 @@ def compute_outputs_at_dose(
         except Exception as e:
             print(f"  [FAIL] Skipping {mid}: {e}")
 
-    if not models:
-        raise RuntimeError("No models loaded. Aborting Exp 9.")
-
     n_models = len(models)
-    n_samples = len(sentences)
-    preds = np.zeros((n_models, n_samples), dtype=float)
+    if n_models < 3:
+        print("Less than 3 models loaded. Aborting.")
+        return
 
-    print(f"Querying all models at dose = {theta:.2f}...")
-    for mi, model in enumerate(models):
-        for si, text in enumerate(tqdm(sentences, desc=f"  Model {mi+1}/{n_models}")):
-            # Deterministic intervention; consistent with Exp 7
-            seed = make_stable_seed(text=text, theta=theta)
-            perturbed = intervention.apply(text, theta, seed=seed)
-            preds[mi, si] = float(model._forward(perturbed))
-
-    return models, preds
-
-
-def compute_routing_metrics(
-    models: List[HuggingFaceWrapper],
-    preds: np.ndarray,
-) -> pd.DataFrame:
-    """
-    Compute, for each target model t, at the chosen dose:
-
-      - Global disagreement D_t
-      - Best single-peer MAE_single(t)
-      - Oracle router MAE_oracle(t)
-    """
-    n_models, n_samples = preds.shape
-    short_names = ["BERT", "DistilBERT", "RoBERTa", "ALBERT", "XLNet"]
     short_names = short_names[:n_models]
 
     rows = []
 
+    # 3) For each target, fit convex weights on P_fit and evaluate on P_eval
     for t_idx in range(n_models):
+        target_model = models[t_idx]
         target_name = short_names[t_idx]
-        target_outputs = preds[t_idx]  # (n_samples,)
+        peers = [models[j] for j in range(n_models) if j != t_idx]
 
-        peer_indices = [j for j in range(n_models) if j != t_idx]
-        peer_outputs = preds[peer_indices]  # (n_peers, n_samples)
+        print(f"\n>>> Target: {target_name}")
 
-        # Absolute differences between target and each peer for each sample
-        abs_diffs = np.abs(peer_outputs - target_outputs[None, :])  # (n_peers, n_samples)
+        eco = Ecosystem(target=target_model, peers=peers)
 
-        # 1) Global disagreement: mean over peers and samples
+        # 3.1 Fit phase at theta = dose
+        print("  [Phase] Fitting convex router on P_fit (mid dose)...")
+        fit_X, fit_Theta, fit_seeds = build_query_grid(fit_texts, theta=theta)
+
+        y_t_fit, Y_p_fit = eco.batched_query(
+            X=fit_X,
+            Thetas=fit_Theta,
+            intervention=intervention,
+            seeds=fit_seeds,
+        )
+
+        y_t_fit_vec = y_t_fit.reshape(-1, 1)
+        Y_p_fit_mat = Y_p_fit
+
+        _, w_hat = DISCOSolver.solve_weights_and_distance(
+            y_t_fit_vec,
+            Y_p_fit_mat,
+        )
+        w_hat = np.asarray(w_hat, dtype=float).flatten()
+
+        print(f"  [Fit] Learned convex weights w_hat (first 3): {w_hat[:3]}")
+
+        # 3.2 Eval phase at theta = dose
+        print("  [Phase] Evaluating routing baselines on P_eval (mid dose)...")
+        eval_X, eval_Theta, eval_seeds = build_query_grid(eval_texts, theta=theta)
+
+        y_t_eval, Y_p_eval = eco.batched_query(
+            X=eval_X,
+            Thetas=eval_Theta,
+            intervention=intervention,
+            seeds=eval_seeds,
+        )
+
+        # Global disagreement (model differencing baseline)
+        abs_diffs = np.abs(Y_p_eval - y_t_eval[:, None])  # (n_eval, n_peers)
         global_dis = float(abs_diffs.mean())
 
-        # 2) Best single peer: choose one peer j for all samples
-        mae_per_peer = abs_diffs.mean(axis=1)  # (n_peers,)
-        best_peer_idx = int(np.argmin(mae_per_peer))
-        best_peer_name = short_names[peer_indices[best_peer_idx]]
-        mae_single = float(mae_per_peer[best_peer_idx])
+        # Best single peer (fixed index across all samples)
+        mae_per_peer = abs_diffs.mean(axis=0)  # (n_peers,)
+        best_peer_rel_idx = int(np.argmin(mae_per_peer))
+        best_peer_name = short_names[[j for j in range(n_models) if j != t_idx][best_peer_rel_idx]]
+        mae_single = float(mae_per_peer[best_peer_rel_idx])
 
-        # 3) Oracle router: choose, for each sample, the closest peer
-        per_sample_min = abs_diffs.min(axis=0)  # (n_samples,)
+        # Oracle router (per-sample best peer)
+        per_sample_min = abs_diffs.min(axis=1)  # (n_eval,)
         mae_oracle = float(per_sample_min.mean())
+
+        # Convex router using global w_hat (same as DISCO baseline)
+        y_mix_convex = Y_p_eval @ w_hat
+        mae_convex = float(np.mean(np.abs(y_t_eval - y_mix_convex)))
 
         rows.append(
             {
@@ -180,70 +249,21 @@ def compute_routing_metrics(
                 "MAE_SinglePeer": mae_single,
                 "BestPeerName": best_peer_name,
                 "MAE_OracleRouter": mae_oracle,
-                "NumSamples": n_samples,
+                "MAE_ConvexRouter": mae_convex,
+                "Dose": theta,
+                "NumFitSamples": len(fit_texts),
+                "NumEvalSamples": len(eval_texts),
             }
         )
 
-    return pd.DataFrame(rows)
+    df_out = pd.DataFrame(rows)
 
-
-def run_exp9_routing_sanity_middose(
-    max_samples: int = 1000,
-    dose: float = 0.5,
-    output_filename: str = "exp9_routing_sanity_dose05.csv",
-):
-    """
-    Main entry point for Exp 9 (mid-dose routing sanity check).
-
-    Steps:
-      1) Load and subsample SST-2 sentences using the same RNG scheme as Exp 7.
-      2) Query all ecosystem models at a fixed mid dose (theta = 0.5).
-      3) For each target, compute:
-           - Global disagreement D_t(theta)
-           - Best single-peer MAE
-           - Oracle router MAE
-      4) Save a summary CSV for downstream visualization (Notebook 10).
-    """
-    print("=== Exp 9: Routing-based sanity check at dose = 0.5 ===")
-
-    # Fix seeds for reproducibility and alignment with Exp 7
-    np_rng = np.random.RandomState(0)
-    torch.manual_seed(0)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-
-    # 1) Load sentences (aligned with Exp 7 sampling)
-    sentences = load_sentences_sst2_like_exp7(max_samples=max_samples, np_rng=np_rng)
-
-    # 2) Define ecosystem models (same ordering as Exp 7)
-    model_ids = [
-        "textattack/bert-base-uncased-SST-2",
-        "textattack/distilbert-base-uncased-SST-2",
-        "textattack/roberta-base-SST-2",
-        "textattack/albert-base-v2-SST-2",
-        "textattack/xlnet-base-cased-SST-2",
-    ]
-
-    models, preds = compute_outputs_at_dose(
-        sentences=sentences,
-        model_ids=model_ids,
-        device=device,
-        dose=dose,
-    )
-
-    # 3) Compute routing metrics
-    df_metrics = compute_routing_metrics(models, preds)
-    print(f"\nRouting metrics at dose = {dose:.2f}:")
-    print(df_metrics)
-
-    # 4) Save results
     out_dir = os.path.join("results", "tables")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, output_filename)
-    df_metrics.to_csv(out_path, index=False)
+    df_out.to_csv(out_path, index=False)
 
-    print(f"\nSaved routing sanity check results to: {out_path}")
+    print(f"\nSaved mid-dose convex-routing sanity results to: {out_path}")
     print("Done.")
 
 
@@ -251,7 +271,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Exp 9: Routing-based sanity check at mid dose (theta = 0.5)."
+        description="Exp 9 (revised): Mid-dose convex-routing sanity check."
     )
     parser.add_argument(
         "--max_samples",
@@ -263,13 +283,13 @@ def main():
         "--dose",
         type=float,
         default=0.5,
-        help="Masking dose (theta) for this routing sanity check.",
+        help="Masking dose (theta) for this experiment.",
     )
     parser.add_argument(
         "--output_filename",
         type=str,
-        default="exp9_routing_sanity_dose05.csv",
-        help="CSV file name under results/tables/.",
+        default="exp9_routing_sanity_dose05_convex.csv",
+        help="Output CSV filename under results/tables/.",
     )
 
     args = parser.parse_args()
