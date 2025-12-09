@@ -101,7 +101,58 @@ def compute_outputs_at_dose_zero(
     return models, preds
 
 
-# === (compute_routing_metrics 与之前版本相同，略) ===
+def compute_routing_metrics(
+    models: List[HuggingFaceWrapper],
+    preds: np.ndarray,
+) -> pd.DataFrame:
+    """
+    Compute, for each target model t:
+
+      - Global disagreement D_t
+      - Best single-peer MAE_single(t)
+      - Oracle router MAE_oracle(t)
+    """
+    n_models, n_samples = preds.shape
+    short_names = ["BERT", "DistilBERT", "RoBERTa", "ALBERT", "XLNet"]
+    short_names = short_names[:n_models]
+
+    rows = []
+
+    for t_idx in range(n_models):
+        target_name = short_names[t_idx]
+        target_outputs = preds[t_idx]  # (n_samples,)
+
+        peer_indices = [j for j in range(n_models) if j != t_idx]
+        peer_outputs = preds[peer_indices]  # (n_peers, n_samples)
+
+        # Absolute differences between target and each peer for each sample
+        abs_diffs = np.abs(peer_outputs - target_outputs[None, :])  # (n_peers, n_samples)
+
+        # 1) Global disagreement: mean over peers and samples
+        global_dis = float(abs_diffs.mean())
+
+        # 2) Best single peer: choose one peer j for all samples
+        mae_per_peer = abs_diffs.mean(axis=1)  # (n_peers,)
+        best_peer_idx = int(np.argmin(mae_per_peer))
+        best_peer_name = short_names[peer_indices[best_peer_idx]]
+        mae_single = float(mae_per_peer[best_peer_idx])
+
+        # 3) Oracle router: choose, for each sample, the closest peer
+        per_sample_min = abs_diffs.min(axis=0)  # (n_samples,)
+        mae_oracle = float(per_sample_min.mean())
+
+        rows.append(
+            {
+                "TargetModel": target_name,
+                "GlobalDisagreement_D": global_dis,
+                "MAE_SinglePeer": mae_single,
+                "BestPeerName": best_peer_name,
+                "MAE_OracleRouter": mae_oracle,
+                "NumSamples": n_samples,
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 def run_exp8_routing_sanity(
     max_samples: int = 1000,
@@ -159,3 +210,34 @@ def run_exp8_routing_sanity(
 
     print(f"\nSaved routing sanity check results to: {out_path}")
     print("Done.")
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Exp 8: Routing-based sanity check at dose = 0."
+    )
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=1000,
+        help="Maximum number of SST-2 validation sentences.",
+    )
+    parser.add_argument(
+        "--output_filename",
+        type=str,
+        default="exp8_routing_sanity_dose0.csv",
+        help="CSV file name under results/tables/.",
+    )
+
+    args = parser.parse_args()
+
+    run_exp8_routing_sanity(
+        max_samples=args.max_samples,
+        output_filename=args.output_filename,
+    )
+
+
+if __name__ == "__main__":
+    main()
