@@ -197,7 +197,7 @@ def run_exp8_routing_sanity(
         device=device,
     )
 
-    # 3) Compute routing metrics (same as之前版本)
+    # 3) Compute routing metrics at dose = 0
     df_metrics = compute_routing_metrics(models, preds)
     print("\nRouting metrics at dose = 0:")
     print(df_metrics)
