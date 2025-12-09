@@ -1,9 +1,16 @@
 # experiments/exp6_bert_multicontext.py
+#
+# Multi-context DISCO uniqueness experiment for the BERT ecosystem.
+# This version is aligned with Exp 7:
+#   - it uses the same global sentence sampling scheme,
+#   - and the same deterministic intervention seeds,
+# so that Exp 6 and Exp 7 operate on identical (x, theta) grids.
 
 import sys
 import os
 import argparse
 from typing import List
+import hashlib
 
 import numpy as np
 import pandas as pd
@@ -17,6 +24,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from isqed.real_world import HuggingFaceWrapper, MaskingIntervention
 from isqed.geometry import DISCOSolver
 from isqed.ecosystem import Ecosystem
+from experiments.utils import make_stable_seed
+
+DOSES_FIT = np.linspace(0.0, 0.9, 10)
+DOSES_EVAL = np.linspace(0.0, 0.9, 10)
 
 
 # ===========================
@@ -128,8 +139,15 @@ def run_multicontext_experiment(
           - fit w_rest on P_fit using low doses
           - evaluate PIER on P_eval using high doses
       * collect mean PIER per dose and store in a CSV file.
+
+    Sentence sampling and intervention seeds are aligned with Exp 7
+    to facilitate direct comparison between PIER and raw disagreement.
     """
-    print("=== Exp 6: BERT Multi-Context DISCO (Uniqueness via Ecosystem) ===")
+    print("=== Exp 6: BERT Multi-Context DISCO (Uniqueness via Ecosystem, aligned with Exp 7) ===")
+
+    # Fix random seeds for reproducibility and alignment with Exp 7
+    np_rng = np.random.RandomState(0)
+    torch.manual_seed(0)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -152,6 +170,7 @@ def run_multicontext_experiment(
         try:
             m = HuggingFaceWrapper(mid, device)
             models.append(m)
+            print(f"  [OK] Loaded: {mid}")
         except Exception as e:
             print(f"  [FAIL] Skipping {mid}: {e}")
 
@@ -160,7 +179,6 @@ def run_multicontext_experiment(
         print("Less than 3 models loaded. Aborting experiment.")
         return
 
-    # Align short_names with the successfully loaded models
     short_names = short_names[:n_models]
 
     # -----------------------
@@ -171,17 +189,16 @@ def run_multicontext_experiment(
     print("Loading SST-2 validation data...")
     try:
         dataset = load_dataset("glue", "sst2", split="validation")
-        all_sentences = list(dataset["sentence"])
+        all_sentences = dataset["sentence"]
     except Exception as e:
         print(f"  [WARN] Failed to load SST-2 from datasets: {e}")
-        # Small fallback set if dataset loading fails
-        all_sentences = ["This sentence is a test sentence."] * 1000
+        all_sentences = [
+            "This sentence is a test sentence.",
+        ] * 1000
 
-    # Subsample to at most `max_samples` sentences
-    rng_global = np.random.RandomState(0)
     all_sentences = np.array(all_sentences)
     if max_samples is not None and max_samples < len(all_sentences):
-        idx = rng_global.choice(len(all_sentences), size=max_samples, replace=False)
+        idx = np_rng.choice(len(all_sentences), size=max_samples, replace=False)
         all_sentences = all_sentences[idx]
     all_sentences = all_sentences.tolist()
 
@@ -192,8 +209,8 @@ def run_multicontext_experiment(
     features_df = compute_sentence_features(all_sentences, ref_model)
 
     # Dose design: low doses for P_fit, high doses for P_eval
-    doses_fit = np.linspace(0.0, 0.3, 4)    # not overlap with eval
-    doses_eval = np.linspace(0.4, 0.9, 6)  
+    doses_fit = DOSES_FIT    
+    doses_eval = DOSES_EVAL  
 
     print(f"P_fit doses (low):  {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")
@@ -203,9 +220,6 @@ def run_multicontext_experiment(
     # -----------------------
     results = []
 
-    rng = np.random.RandomState(42)
-
-    # Each context_type uses a specific column in features_df
     context_specs = [
         ("length", "length_bucket"),
         ("sentiment", "sentiment_bucket"),
@@ -223,9 +237,9 @@ def run_multicontext_experiment(
                 print(f"  -> Too small (< {min_context_size}), skipping.")
                 continue
 
-            # Shuffle indices within this context
+            # Shuffle indices within this context using the shared RNG (aligned with Exp 7)
             idx = df_ctx.index.to_numpy()
-            rng.shuffle(idx)
+            np_rng.shuffle(idx)
             df_ctx_shuffled = features_df.loc[idx]
 
             # Cap the number of sentences per context
@@ -258,8 +272,12 @@ def run_multicontext_experiment(
 
                 for text in fit_texts:
                     for theta in doses_fit:
-                        # Seed is deterministic function of context and dose
-                        seed = abs(hash((context_type, ctx_label, text, float(theta)))) % (2**32)
+                        seed = make_stable_seed(
+                            context_type=context_type,
+                            ctx_label=ctx_label,
+                            text=text,
+                            theta=float(theta)
+                        )
                         fit_X.append(text)
                         fit_Theta.append(float(theta))
                         fit_seeds.append(int(seed))
@@ -275,7 +293,6 @@ def run_multicontext_experiment(
                     seeds=fit_seeds,
                 )
 
-                # Ensure target vector is (N, 1) for DISCOSolver
                 y_t_fit_vec = y_t_fit.reshape(-1, 1)
                 Y_p_fit_mat = Y_p_fit
 
@@ -295,7 +312,12 @@ def run_multicontext_experiment(
 
                 for text in eval_texts:
                     for theta in doses_eval:
-                        seed = abs(hash((context_type, ctx_label, text, float(theta)))) % (2**32)
+                        seed = make_stable_seed(
+                            context_type=context_type,
+                            ctx_label=ctx_label,
+                            text=text,
+                            theta=float(theta),
+                        )
                         eval_X.append(text)
                         eval_Theta.append(float(theta))
                         eval_seeds.append(int(seed))
@@ -312,11 +334,10 @@ def run_multicontext_experiment(
                 )
 
                 eval_Theta_arr = np.asarray(eval_Theta, dtype=float)
-                # PIER residuals for each evaluation point
                 y_mix_eval = Y_p_eval @ w_hat_rest
                 residuals_all = np.abs(y_t_eval - y_mix_eval)
 
-                # Aggregate residuals by exact dose (using a tolerance)
+                # Aggregate residuals by exact dose
                 for theta in doses_eval:
                     mask = np.isclose(eval_Theta_arr, float(theta), atol=1e-8)
                     vals = residuals_all[mask]
@@ -362,7 +383,7 @@ def run_multicontext_experiment(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Exp 6: Multi-context DISCO for BERT ecosystem on SST-2 (via Ecosystem)."
+        description="Exp 6: Multi-context DISCO for BERT ecosystem on SST-2 (via Ecosystem, aligned with Exp 7)."
     )
     parser.add_argument(
         "--max_samples",

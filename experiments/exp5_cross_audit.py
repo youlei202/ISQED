@@ -14,6 +14,7 @@
 
 import sys
 import os
+
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -26,10 +27,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from isqed.real_world import HuggingFaceWrapper, MaskingIntervention
 from isqed.geometry import DISCOSolver
 from isqed.ecosystem import Ecosystem
+from experiments.utils import make_stable_seed
+
+DOSES_FIT = np.linspace(0.0, 0.9, 10)
+DOSES_EVAL = np.linspace(0.0, 0.9, 10)
 
 
 def run_cross_audit_dual_mode():
     print("--- Running Exp 5: Full Ecosystem Dual-Mode Audit (DISCO Standard, via Ecosystem) ---")
+
+    # Fix seeds for reproducibility
+    np_rng = np.random.RandomState(0)
+    torch.manual_seed(0)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -84,9 +93,8 @@ def run_cross_audit_dual_mode():
             "Amazing direction and visuals.",
         ] * 40
 
-    rng = np.random.RandomState(0)
     all_sentences = np.array(all_sentences)
-    rng.shuffle(all_sentences)
+    np_rng.shuffle(all_sentences)
     n_total = len(all_sentences)
     n_fit = n_total // 2
     fit_texts = all_sentences[:n_fit].tolist()
@@ -95,8 +103,8 @@ def run_cross_audit_dual_mode():
     print(f"Total sentences: {n_total}, fit: {len(fit_texts)}, eval: {len(eval_texts)}")
 
     # Dose design: low doses for P_fit, high doses for P_eval
-    doses_fit = np.linspace(0.0, 0.4, 10)    # not overlap with eval
-    doses_eval = np.linspace(0.4, 0.9, 10)   
+    doses_fit = DOSES_FIT
+    doses_eval = DOSES_EVAL
 
     print(f"P_fit doses (low):  {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")
@@ -108,7 +116,7 @@ def run_cross_audit_dual_mode():
     n_eval_points = len(eval_texts) * len(doses_eval)
     eval_index = []
     for i in range(len(eval_texts)):
-        for j, theta in enumerate(doses_eval):
+        for theta in doses_eval:
             eval_index.append(f"Sample {i+1} $\\theta={theta:.2f}$")
 
     final_residual_data = pd.DataFrame()
@@ -144,7 +152,7 @@ def run_cross_audit_dual_mode():
         # Build a shared batch of (text, theta, seed) for both ecosystems
         for text in fit_texts:
             for theta in doses_fit:
-                seed = abs(hash((text, float(theta)))) % (2**32)
+                seed = make_stable_seed(text=text, theta=float(theta))
                 fit_X.append(text)
                 fit_Theta.append(float(theta))
                 fit_seeds.append(int(seed))
@@ -211,7 +219,7 @@ def run_cross_audit_dual_mode():
 
         for text in eval_texts:
             for theta in doses_eval:
-                seed = abs(hash((text, float(theta)))) % (2**32)
+                seed = make_stable_seed(text=text, theta=float(theta))
                 eval_X.append(text)
                 eval_Theta.append(float(theta))
                 eval_seeds.append(int(seed))

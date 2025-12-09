@@ -12,6 +12,7 @@
 import sys
 import os
 from typing import List
+import hashlib
 
 import numpy as np
 import pandas as pd
@@ -24,6 +25,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from isqed.real_world import HuggingFaceWrapper, MaskingIntervention
 from isqed.ecosystem import Ecosystem
+from experiments.utils import make_stable_seed
+
+DOSES = np.linspace(0.0, 0.9, 10)
 
 
 # ===========================
@@ -132,6 +136,10 @@ def run_context_disagreement_experiment(
     """
     print("=== Exp 7: Context-wise disagreement for BERT ecosystem ===")
 
+    # Fix random seeds for reproducibility
+    np_rng = np.random.RandomState(0)
+    torch.manual_seed(0)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
@@ -182,10 +190,9 @@ def run_context_disagreement_experiment(
             "Amazing direction and visuals.",
         ] * 40
 
-    rng = np.random.RandomState(0)
     all_sentences = np.array(all_sentences)
     if max_samples is not None and max_samples < len(all_sentences):
-        idx = rng.choice(len(all_sentences), size=max_samples, replace=False)
+        idx = np_rng.choice(len(all_sentences), size=max_samples, replace=False)
         all_sentences = all_sentences[idx]
     all_sentences = all_sentences.tolist()
 
@@ -196,8 +203,7 @@ def run_context_disagreement_experiment(
     features_df = compute_sentence_features(all_sentences, ref_model)
 
     # Doses of interest: a low dose and a high dose to highlight regime change
-    doses = [0.40, 0.88]
-
+    doses = DOSES
     print(f"Doses for disagreement analysis: {doses}")
 
     # -----------------------
@@ -223,7 +229,7 @@ def run_context_disagreement_experiment(
 
             # Shuffle and cap the number of sentences for this context
             idx = df_ctx.index.to_numpy()
-            rng.shuffle(idx)
+            np_rng.shuffle(idx)
             df_ctx_shuffled = features_df.loc[idx]
 
             max_per_context = min(n_ctx, 200)
@@ -238,7 +244,12 @@ def run_context_disagreement_experiment(
 
             for text in sentences_ctx:
                 for theta in doses:
-                    seed = abs(hash((context_type, ctx_label, text, float(theta)))) % (2**32)
+                    seed = make_stable_seed(
+                        context_type=context_type,
+                        ctx_label=ctx_label,
+                        text=text,
+                        theta=float(theta),
+                    )
                     eval_X.append(text)
                     eval_Theta.append(float(theta))
                     eval_seeds.append(int(seed))
@@ -268,7 +279,6 @@ def run_context_disagreement_experiment(
                 eval_Theta_arr = np.asarray(eval_Theta, dtype=float)
 
                 # Compute per-sample disagreement: mean absolute difference over peers
-                # shape: (N_eval,) for y_t_eval, (N_eval, n_peers) for Y_p_eval
                 abs_diff = np.abs(Y_p_eval - y_t_eval[:, None])  # broadcast over peers
                 mean_abs_diff_per_sample = abs_diff.mean(axis=1)
 

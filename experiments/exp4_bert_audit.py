@@ -1,8 +1,8 @@
 # experiments/exp4_bert_audit_disco.py
 #
 # In-silico ecosystem audit on SST-2 with a DISCO-style dose-splitting design:
-# - P_fit: low-dose masking (θ in [0.0, 0.3]) used to learn convex peer weights
-# - P_eval: high-dose masking (θ in [0.4, 0.88]) used to evaluate PIER
+# - P_fit: low-dose masking (θ in [0.0, 0.5]) used to learn convex peer weights
+# - P_eval: high-dose masking (θ in [0.4, 0.9]) used to evaluate PIER
 #
 # For each target model, we:
 #   1) Collect a batch of (text, low-dose) responses from target and peers
@@ -24,12 +24,22 @@ from isqed.real_world import HuggingFaceWrapper, MaskingIntervention
 from isqed.geometry import DISCOSolver
 from isqed.ecosystem import Ecosystem
 
+# Import stable seed helper from experiments/utils.py
+this_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(this_dir)
+from experiments.utils import make_stable_seed  
+
+DOSES_FIT = np.linspace(0.0, 0.9, 10)
+DOSES_EVAL = np.linspace(0.0, 0.9, 10)
 
 def run_bert_experiment():
     print("--- Running Exp 4 (DISCO-style BERT Ecosystem Audit, via Ecosystem) ---")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+
+    # Fix PyTorch RNG for reproducibility
+    torch.manual_seed(0)
 
     # =====================================================================
     # 1. Define the peer ecosystem
@@ -137,8 +147,8 @@ def run_bert_experiment():
 
     print(f"Total sentences: {n_total}, fit: {len(fit_texts)}, eval: {len(eval_texts)}")
 
-    doses_fit = np.linspace(0.0, 0.4, 10)    # not overlap with eval
-    doses_eval = np.linspace(0.4, 0.9, 10)   
+    doses_fit = DOSES_FIT
+    doses_eval = DOSES_EVAL
 
     print(f"P_fit doses (low):  {doses_fit}")
     print(f"P_eval doses (high): {doses_eval}")
@@ -167,7 +177,8 @@ def run_bert_experiment():
 
         for text in fit_texts:
             for theta in doses_fit:
-                seed = abs(hash((text, float(theta)))) % (2**32)
+                # Deterministic intervention seed
+                seed = make_stable_seed(text=text, theta=float(theta))
                 fit_X.append(text)
                 fit_Theta.append(float(theta))
                 fit_seeds.append(int(seed))
@@ -225,7 +236,8 @@ def run_bert_experiment():
 
         for text in eval_texts:
             for theta in doses_eval:
-                seed = abs(hash((text, float(theta)))) % (2**32)
+                # Deterministic intervention seed
+                seed = make_stable_seed(text=text, theta=float(theta))
                 eval_X.append(text)
                 eval_Theta.append(float(theta))
                 eval_seeds.append(int(seed))
