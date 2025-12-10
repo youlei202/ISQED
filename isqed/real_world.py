@@ -73,7 +73,7 @@ class MaskingIntervention(Intervention):
                 words[i] = self.mask_token
         return " ".join(words)
 
-class ImageModelWrapper:
+class ImageModelWrapperLogitMargin:
     """
     Lightweight wrapper around a torchvision image classifier.
 
@@ -118,6 +118,85 @@ class ImageModelWrapper:
         margin = float(logit_true - max_other)
         return margin
 
+
+class ImageModelWrapperLabelLogit:
+    """
+    Lightweight wrapper around a torchvision image classifier.
+
+    The wrapper takes as input a tuple (x, y):
+      - x: tensor of shape (3, H, W), already normalized
+      - y: integer class label (ImageNet index)
+
+    It outputs a scalar g(x) depending on `mode`:
+
+      - "margin":        logit_y - max_{k != y} logit_k           (原始定义)
+      - "tanh_margin":   tanh( (logit_y - max_{others}) / tau )   (压缩极端值)
+      - "p_true":        softmax(logits)_y                        (true-class prob)
+      - "signed_pred":   +p_hat if correct, -p_hat if incorrect   (自信对/错)
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        name: str,
+        device: str,
+        mode: str = "tanh_margin",
+        tau: float = 10.0,
+    ):
+        self.model = model.to(device)
+        self.model.eval()
+        self.name = name
+        self.device = device
+        self.mode = mode
+        self.tau = tau
+
+    @torch.no_grad()
+    def _forward(self, sample: Tuple[torch.Tensor, int]) -> float:
+        x, y = sample
+        x = x.to(self.device)
+        y_int = int(y)
+
+        logits = self.model(x.unsqueeze(0))  # (1, C)
+        logits = logits[0]  # (C,)
+        if logits.ndim != 1:
+            logits = logits.view(-1)
+
+        if self.mode == "margin":
+            logit_y = logits[y_int].item()
+            mask = torch.ones_like(logits, dtype=torch.bool)
+            mask[y_int] = False
+            max_other = logits[mask].max().item()
+            return float(logit_y - max_other)
+
+        # softmax once,用于下面几种模式
+        probs = torch.softmax(logits, dim=0)
+        p_true = probs[y_int].item()
+        pred_idx = int(torch.argmax(probs).item())
+        p_pred = probs[pred_idx].item()
+
+        if self.mode == "p_true":
+            return float(p_true)
+
+        if self.mode == "tanh_margin":
+            logit_y = logits[y_int]
+            mask = torch.ones_like(logits, dtype=torch.bool)
+            mask[y_int] = False
+            max_other = logits[mask].max()
+            margin = (logit_y - max_other) / self.tau
+            return float(torch.tanh(margin).item())
+
+        if self.mode == "signed_pred":
+            if pred_idx == y_int:
+                return float(p_pred)   # confident correct: positive
+            else:
+                return float(-p_pred)  # confident wrong: negative
+
+        # fallback: original margin
+        logit_y = logits[y_int].item()
+        mask = torch.ones_like(logits, dtype=torch.bool)
+        mask[y_int] = False
+        max_other = logits[mask].max().item()
+        return float(logit_y - max_other)
 
 
 class AdversarialFGSMIntervention:

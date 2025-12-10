@@ -290,7 +290,7 @@ def run_shape_texture_experiment(
     shape_root: str,
     max_samples_per_context: int = 800,
     fit_fraction: float = 0.5,
-    output_filename: str = "exp11_shape_texture_pier.csv",
+    output_filename: str = "exp12_shape_texture_pier_separated.csv",
 ):
     print("=== Exp 11: Shape-biased vs standard CNNs (texture vs shape contexts) ===")
 
@@ -301,40 +301,19 @@ def run_shape_texture_experiment(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # 1) Load models
+    # 1) Load standard models once
     print("\nLoading standard ImageNet models...")
     models_std = load_standard_models(device=device)
 
-    print("Loading shape-biased ResNet50 variants (SIN / SIN+IN / SIN+IN→IN)...")
-    shape_variants = ["A", "B", "C"]
-    models_shape: Dict[str, ImageModelWrapperLabelLogit] = {}
-    for v in shape_variants:
-        m = load_shape_biased_resnet50(device=device, variant=v)
-        models_shape[m.name] = m
-        print(f"  [OK] Loaded {m.name} (variant {v}).")
-
-    # Combine into ecosystem: standard models + all three shape-biased variants
-    all_models: Dict[str, ImageModelWrapperLabelLogit] = {}
-    all_models.update(models_std)
-    all_models.update(models_shape)
-
-    model_names = list(all_models.keys())
-    print(f"Ecosystem models: {model_names}")
-
-    # 2) Load context datasets
+    # 2) Pre-load context datasets and fixed splits (shared across variants)
     contexts = [
         ("texture_natural", natural_root),
         ("shape_bias", shape_root),
     ]
 
-    intervention = IdentityIntervention()
-    DOSES = [0.0]  # single theta = 0 (no intervention)
-
-    rows = []
-
+    contexts_cache = {}
     for context_name, root in contexts:
-        print(f"\n=== Context: {context_name} ===")
-
+        print(f"\n=== Pre-loading context: {context_name} ===")
         samples_ctx, ids_ctx = load_context_samples(
             root=root,
             max_samples=max_samples_per_context,
@@ -344,7 +323,7 @@ def run_shape_texture_experiment(
 
         n_ctx = len(samples_ctx)
         if n_ctx < 10:
-            print(f"  [WARN] Very small context ({n_ctx} samples). Skipping.")
+            print(f"  [WARN] Very small context ({n_ctx} samples). Skipping this context.")
             continue
 
         fit_idx, eval_idx = split_fit_eval_indices(n_ctx, np_rng, fit_fraction)
@@ -355,112 +334,159 @@ def run_shape_texture_experiment(
         eval_ids = [ids_ctx[i] for i in eval_idx]
 
         print(
-            f"  -> Using {len(fit_samples)} for P_fit, "
-            f"{len(eval_samples)} for P_eval."
+            f"  -> Context '{context_name}': using {len(fit_samples)} for P_fit, "
+            f"{len(eval_samples)} for P_eval (raw size={n_ctx})."
         )
 
-        # 3) For each target model, run DISCO-style uniqueness audit
-        for target_name in model_names:
-            print(f"\n  >> Target: {target_name}")
+        contexts_cache[context_name] = {
+            "fit_samples": fit_samples,
+            "fit_ids": fit_ids,
+            "eval_samples": eval_samples,
+            "eval_ids": eval_ids,
+            "n_ctx": n_ctx,
+        }
 
-            target_model = all_models[target_name]
-            peers = [m for name, m in all_models.items() if name != target_name]
+    intervention = IdentityIntervention()
+    DOSES = [0.0]  # single theta = 0 (no intervention)
 
-            eco = Ecosystem(target=target_model, peers=peers)
+    rows = []
 
-            # -------------------------------
-            # 3.1 FIT phase (learn w_hat)
-            # -------------------------------
-            fit_X = []
-            fit_Theta = []
-            fit_seeds = []
+    # 3) Loop over shape-biased variants: A, B, C
+    shape_variants = ["A", "B", "C"]
 
-            for (sample, sample_id) in zip(fit_samples, fit_ids):
-                for theta in DOSES:
-                    seed = make_stable_seed(
-                        text=f"{context_name}|fit|{sample_id}",
-                        theta=float(theta),
-                        context_type="dataset",
-                        ctx_label=context_name,
-                    )
-                    fit_X.append(sample)
-                    fit_Theta.append(float(theta))
-                    fit_seeds.append(int(seed))
+    for variant in shape_variants:
+        print(f"\n==============================")
+        print(f"=== Shape variant: {variant} ===")
+        print(f"==============================")
 
-            y_t_fit, Y_p_fit = eco.batched_query(
-                X=fit_X,
-                Thetas=fit_Theta,
-                intervention=intervention,
-                seeds=fit_seeds,
-            )
+        # Load the corresponding shape-biased ResNet-50
+        model_shape = load_shape_biased_resnet50(device=device, variant=variant)
 
-            y_t_fit_vec = y_t_fit.reshape(-1, 1)
-            Y_p_fit_mat = Y_p_fit
+        # Build ecosystem: standard models + this shape-biased variant
+        all_models: Dict[str, ImageModelWrapperLabelLogit] = {}
+        all_models.update(models_std)
+        all_models[model_shape.name] = model_shape
 
-            _, w_hat = DISCOSolver.solve_weights_and_distance(
-                y_t_fit_vec,
-                Y_p_fit_mat,
-            )
-            w_hat = np.asarray(w_hat, dtype=float).flatten()
+        model_names = list(all_models.keys())
+        print(f"Ecosystem models (variant {variant}): {model_names}")
 
-            print(f"    [Fit] Learned convex weights (first 3): {w_hat[:3]}")
+        # For each context, run DISCO-style uniqueness audit
+        for (context_name, _root) in contexts:
+            if context_name not in contexts_cache:
+                print(f"[WARN] Context '{context_name}' missing in cache, skipping.")
+                continue
 
-            # -------------------------------
-            # 3.2 EVAL phase (compute PIER)
-            # -------------------------------
-            eval_X = []
-            eval_Theta = []
-            eval_seeds = []
+            cache = contexts_cache[context_name]
+            fit_samples = cache["fit_samples"]
+            fit_ids = cache["fit_ids"]
+            eval_samples = cache["eval_samples"]
+            eval_ids = cache["eval_ids"]
+            n_ctx = cache["n_ctx"]
 
-            for (sample, sample_id) in zip(eval_samples, eval_ids):
-                for theta in DOSES:
-                    seed = make_stable_seed(
-                        text=f"{context_name}|eval|{sample_id}",
-                        theta=float(theta),
-                        context_type="dataset",
-                        ctx_label=context_name,
-                    )
-                    eval_X.append(sample)
-                    eval_Theta.append(float(theta))
-                    eval_seeds.append(int(seed))
+            print(f"\n--- Variant {variant}, Context: {context_name} ---")
 
-            y_t_eval, Y_p_eval = eco.batched_query(
-                X=eval_X,
-                Thetas=eval_Theta,
-                intervention=intervention,
-                seeds=eval_seeds,
-            )
+            for target_name in model_names:
+                print(f"\n  >> Target: {target_name} (variant {variant}, context {context_name})")
 
-            eval_Theta_arr = np.asarray(eval_Theta, dtype=float)
-            y_mix_eval = Y_p_eval @ w_hat
-            residuals_all = np.abs(y_t_eval - y_mix_eval)
+                target_model = all_models[target_name]
+                peers = [m for name, m in all_models.items() if name != target_name]
 
-            for theta in DOSES:
-                mask = np.isclose(eval_Theta_arr, float(theta), atol=1e-8)
-                vals = residuals_all[mask]
-                if vals.size == 0:
-                    continue
+                eco = Ecosystem(target=target_model, peers=peers)
 
-                mean_pier = float(np.mean(vals))
-                std_pier = float(np.std(vals))
-                rows.append(
-                    {
-                        "ContextType": "dataset",
-                        "ContextLabel": context_name,
-                        "TargetModel": target_name,
-                        "Group": (
-                            "Shape-biased CNN"
-                            if target_name.startswith("ShapeResNet50")
-                            else "Standard CNN"
-                        ),
-                        "Dose": float(theta),
-                        "MeanPIER": mean_pier,
-                        "StdPIER": std_pier,
-                        "NumEvalPoints": int(vals.size),
-                        "NumFitPoints": int(len(fit_X)),
-                        "ContextRawSize": int(n_ctx),
-                    }
+                # -------------------------------
+                # 3.1 FIT phase (learn w_hat)
+                # -------------------------------
+                fit_X = []
+                fit_Theta = []
+                fit_seeds = []
+
+                for (sample, sample_id) in zip(fit_samples, fit_ids):
+                    for theta in DOSES:
+                        seed = make_stable_seed(
+                            text=f"{context_name}|fit|{sample_id}|variant={variant}",
+                            theta=float(theta),
+                            context_type="dataset",
+                            ctx_label=context_name,
+                        )
+                        fit_X.append(sample)
+                        fit_Theta.append(float(theta))
+                        fit_seeds.append(int(seed))
+
+                y_t_fit, Y_p_fit = eco.batched_query(
+                    X=fit_X,
+                    Thetas=fit_Theta,
+                    intervention=intervention,
+                    seeds=fit_seeds,
                 )
+
+                y_t_fit_vec = y_t_fit.reshape(-1, 1)
+                Y_p_fit_mat = Y_p_fit
+
+                _, w_hat = DISCOSolver.solve_weights_and_distance(
+                    y_t_fit_vec,
+                    Y_p_fit_mat,
+                )
+                w_hat = np.asarray(w_hat, dtype=float).flatten()
+
+                print(f"    [Fit] Learned convex weights (first 3): {w_hat[:3]}")
+
+                # -------------------------------
+                # 3.2 EVAL phase (compute PIER)
+                # -------------------------------
+                eval_X = []
+                eval_Theta = []
+                eval_seeds = []
+
+                for (sample, sample_id) in zip(eval_samples, eval_ids):
+                    for theta in DOSES:
+                        seed = make_stable_seed(
+                            text=f"{context_name}|eval|{sample_id}|variant={variant}",
+                            theta=float(theta),
+                            context_type="dataset",
+                            ctx_label=context_name,
+                        )
+                        eval_X.append(sample)
+                        eval_Theta.append(float(theta))
+                        eval_seeds.append(int(seed))
+
+                y_t_eval, Y_p_eval = eco.batched_query(
+                    X=eval_X,
+                    Thetas=eval_Theta,
+                    intervention=intervention,
+                    seeds=eval_seeds,
+                )
+
+                eval_Theta_arr = np.asarray(eval_Theta, dtype=float)
+                y_mix_eval = Y_p_eval @ w_hat
+                residuals_all = np.abs(y_t_eval - y_mix_eval)
+
+                for theta in DOSES:
+                    mask = np.isclose(eval_Theta_arr, float(theta), atol=1e-8)
+                    vals = residuals_all[mask]
+                    if vals.size == 0:
+                        continue
+
+                    mean_pier = float(np.mean(vals))
+                    std_pier = float(np.std(vals))
+                    rows.append(
+                        {
+                            "ContextType": "dataset",
+                            "ContextLabel": context_name,
+                            "TargetModel": target_name,
+                            "Group": (
+                                "Shape-biased CNN"
+                                if target_name.startswith("ShapeResNet50")
+                                else "Standard CNN"
+                            ),
+                            "Dose": float(theta),
+                            "MeanPIER": mean_pier,
+                            "StdPIER": std_pier,
+                            "NumEvalPoints": int(vals.size),
+                            "NumFitPoints": int(len(fit_X)),
+                            "ContextRawSize": int(n_ctx),
+                            "ShapeVariant": variant,  # A / B / C
+                        }
+                    )
 
     if not rows:
         print("No rows collected. Something went wrong.")
@@ -510,7 +536,7 @@ def main():
     parser.add_argument(
         "--output_filename",
         type=str,
-        default="exp11_shape_texture_pier.csv",
+        default="exp12_shape_texture_pier_separated.csv",
         help="Output CSV file under results/tables/.",
     )
 
