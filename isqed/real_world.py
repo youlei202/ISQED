@@ -3,6 +3,8 @@ import torch
 import numpy as np
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from isqed.core import ModelUnit, Intervention
+from typing import Tuple, Optional
+import torch.nn as nn
 
 class HuggingFaceWrapper(ModelUnit):
     """
@@ -70,3 +72,95 @@ class MaskingIntervention(Intervention):
             for i in mask_idx:
                 words[i] = self.mask_token
         return " ".join(words)
+
+# ---------------------------------------------------------------------
+# Wrapper for torchvision models
+# ---------------------------------------------------------------------
+class ImageModelWrapper:
+    """
+    Lightweight wrapper around a torchvision image classifier.
+
+    The wrapper takes as input a tuple (x, y):
+      - x: tensor of shape (3, H, W), already normalized
+      - y: integer class label (ImageNet index)
+
+    It outputs a scalar p_correct in [0,1]: the model's predicted
+    probability for the *true* label y under softmax.
+    """
+
+    def __init__(self, model: nn.Module, name: str, device: str):
+        self.model = model.to(device)
+        self.model.eval()
+        self.name = name
+        self.device = device
+        self.softmax = nn.Softmax(dim=1)
+
+    @torch.no_grad()
+    def _forward(self, sample: Tuple[torch.Tensor, int]) -> float:
+        x, y = sample
+        x = x.to(self.device)
+        y_tensor = torch.tensor([y], device=self.device, dtype=torch.long)
+
+        logits = self.model(x.unsqueeze(0))
+        probs = self.softmax(logits)
+        p_correct = probs[0, y_tensor].item()
+        return float(p_correct)
+
+
+# ---------------------------------------------------------------------
+# FGSM-style adversarial intervention
+# ---------------------------------------------------------------------
+class AdversarialFGSMIntervention:
+    """
+    Simple FGSM adversarial intervention driven by a single reference model.
+
+    Input sample is (x, y):
+      - x: normalized image tensor (3, H, W)
+      - y: integer class label
+
+    We compute:
+        x_adv = x + epsilon * sign(grad_x L(ref_model(x), y))
+
+    and return (x_adv, y), so that downstream wrappers can still see
+    the true label y when computing p_correct.
+    """
+
+    def __init__(
+        self,
+        ref_model: nn.Module,
+        device: str,
+        loss_fn: Optional[nn.Module] = None,
+    ):
+        self.ref_model = ref_model.to(device)
+        self.ref_model.eval()
+        self.device = device
+        self.loss_fn = loss_fn if loss_fn is not None else nn.CrossEntropyLoss()
+
+    def apply(
+        self,
+        sample: Tuple[torch.Tensor, int],
+        epsilon: float,
+    ) -> Tuple[torch.Tensor, int]:
+        """
+        Apply a single-step FGSM attack with magnitude epsilon.
+        """
+        x, y = sample
+        x = x.to(self.device)
+        y_tensor = torch.tensor([y], device=self.device, dtype=torch.long)
+
+        x_adv = x.clone().detach().unsqueeze(0)
+        x_adv.requires_grad = True
+
+        logits = self.ref_model(x_adv)
+        loss = self.loss_fn(logits, y_tensor)
+        self.ref_model.zero_grad()
+        loss.backward()
+
+        grad_sign = x_adv.grad.detach().sign()
+        x_adv = x_adv + epsilon * grad_sign
+
+        # Clamp to a reasonable range in normalized space
+        x_adv = torch.clamp(x_adv, -3.0, 3.0)
+
+        x_adv = x_adv.detach().squeeze(0).cpu()
+        return (x_adv, y)
