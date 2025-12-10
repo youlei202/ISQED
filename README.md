@@ -59,7 +59,7 @@ ISQED-Prototype/
 │   ├── geometry.py      # Convex optimization solver (DISCO algorithm)
 │   ├── ecosystem.py     # Container for Target and Peer models
 │   ├── synthetic.py     # Synthetic environments (Linear Structural Models)
-│   ├── real_world.py    # Adapters for HuggingFace Transformers
+│   ├── real_world.py    # Adapters for HuggingFace Transformers, ResNet, BERT, etc.
 │   └── auditing.py      # Implementation of Active vs. Passive auditing strategies
 |
 ├── experiments/
