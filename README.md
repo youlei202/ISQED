@@ -77,7 +77,6 @@ ISQED-Prototype/
 ## 🚀 Installation
 1. **Clone the repository:**
 ```Bash
-git clone [https://github.com/youlei202/ISQED-Prototype.git](https://github.com/youlei202/ISQED-Prototype.git)
 cd ISQED-Prototype
 ```
 
