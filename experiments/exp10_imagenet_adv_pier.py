@@ -53,7 +53,12 @@ import torchvision.models as tv_models
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from isqed.geometry import DISCOSolver
 from isqed.real_world import ImageModelWrapper, AdversarialFGSMIntervention
+from torch.hub import download_url_to_file
 
+
+# ---------------------------------------------------------------------
+# 1. Parameters
+# ---------------------------------------------------------------------
 # Add experiments/ for utils if needed later
 this_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(this_dir)
@@ -61,8 +66,47 @@ sys.path.append(this_dir)
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
-DOSES_FIT = np.linspace(0.0, 0.12, 7)
-DOSES_EVAL = np.linspace(0.0, 0.12, 7)
+DOSES_FIT = np.linspace(0.0, 0.1, 6)
+DOSES_EVAL = np.linspace(0.0, 0.1, 6)
+
+
+# ---------------------------------------------------------------------
+# 2. Checkpoint Configuration
+# ---------------------------------------------------------------------
+# REPLACEMENT: Using MadryLab's standard robust ResNet-50 (ImageNet)
+# Paper: "Robustness (Lib)" / Engstrom et al. (2019)
+# Source: https://huggingface.co/madrylab/robust-imagenet-models
+# This is a direct download link that works without authentication.
+ROBUST_R50_URL = (
+    "https://huggingface.co/madrylab/robust-imagenet-models/resolve/main/"
+    "resnet50_l2_eps3.ckpt"
+)
+CKPT_FILENAME = "resnet50_l2_eps3.ckpt"
+
+def get_robust_checkpoint_path(download_dir="./checkpoints") -> Optional[str]:
+    """
+    Checks if the robust ResNet-50 checkpoint exists locally.
+    If not, downloads it automatically from MadryLab's Hugging Face repo.
+    """
+    os.makedirs(download_dir, exist_ok=True)
+    ckpt_path = os.path.join(download_dir, CKPT_FILENAME)
+
+    if not os.path.exists(ckpt_path):
+        print(f"\n[INFO] Robust checkpoint not found at {ckpt_path}")
+        print(f"[INFO] Downloading robust ResNet-50 (L2 eps=3.0) from Hugging Face...")
+        print(f"       Source: {ROBUST_R50_URL}")
+        try:
+            # torch.hub downloads with a progress bar
+            download_url_to_file(ROBUST_R50_URL, ckpt_path)
+            print("[INFO] Download completed.")
+        except Exception as e:
+            print(f"[ERROR] Failed to download robust checkpoint: {e}")
+            print("        Please check your internet connection or try downloading manually.")
+            return None
+    else:
+        print(f"  [INFO] Found robust checkpoint: {ckpt_path}")
+
+    return ckpt_path
 
 # ---------------------------------------------------------------------
 # 3. Data preparation
@@ -258,6 +302,12 @@ def run_imagenet_adv_pier_experiment(
 
     # 2) Models
     models = load_standard_models(device)
+
+    if robust_ckpt == "AUTO":
+        robust_ckpt = get_robust_checkpoint_path(
+            download_dir=os.path.join(this_dir, "checkpoints")
+        )
+
     robust_wrapper = load_robust_resnet50(device, robust_ckpt=robust_ckpt)
     if robust_wrapper is not None:
         models.append(robust_wrapper)
@@ -404,7 +454,8 @@ def main():
     parser.add_argument(
         "--data_root",
         type=str,
-        required=True,
+        # required=True,
+        default="/work3/leiyo/imagenet",
         help="Path to ImageNet-style folder (ImageFolder) with images.",
     )
     parser.add_argument(
@@ -416,8 +467,8 @@ def main():
     parser.add_argument(
         "--robust_ckpt",
         type=str,
-        default=None,
-        help="Optional path to adversarially trained ResNet-50 checkpoint.",
+        default="AUTO",
+        help="Path to robust ResNet-50 checkpoint, or 'AUTO' to download automatically.",
     )
     parser.add_argument(
         "--output_filename",

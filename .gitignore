@@ -210,3 +210,4 @@ __marimo__/
 # Others
 .history
 results/
+experiments/checkpoints/

@@ -73,9 +73,6 @@ class MaskingIntervention(Intervention):
                 words[i] = self.mask_token
         return " ".join(words)
 
-# ---------------------------------------------------------------------
-# Wrapper for torchvision models
-# ---------------------------------------------------------------------
 class ImageModelWrapper:
     """
     Lightweight wrapper around a torchvision image classifier.
@@ -84,8 +81,12 @@ class ImageModelWrapper:
       - x: tensor of shape (3, H, W), already normalized
       - y: integer class label (ImageNet index)
 
-    It outputs a scalar p_correct in [0,1]: the model's predicted
-    probability for the *true* label y under softmax.
+    It outputs a scalar **margin** for the true class:
+        g(x) = logit_y_true(x) - max_{k != y_true} logit_k(x)
+
+    This is a single real number (scalar), consistent with the paper's
+    definition Y_j(x, θ) ∈ ℝ, but more informative than p(correct)
+    when analysing adversarial robustness.
     """
 
     def __init__(self, model: nn.Module, name: str, device: str):
@@ -93,7 +94,6 @@ class ImageModelWrapper:
         self.model.eval()
         self.name = name
         self.device = device
-        self.softmax = nn.Softmax(dim=1)
 
     @torch.no_grad()
     def _forward(self, sample: Tuple[torch.Tensor, int]) -> float:
@@ -101,15 +101,25 @@ class ImageModelWrapper:
         x = x.to(self.device)
         y_tensor = torch.tensor([y], device=self.device, dtype=torch.long)
 
-        logits = self.model(x.unsqueeze(0))
-        probs = self.softmax(logits)
-        p_correct = probs[0, y_tensor].item()
-        return float(p_correct)
+        # Forward pass
+        logits = self.model(x.unsqueeze(0))  # shape: (1, num_classes)
+
+        # True-class logit
+        logit_true = logits[0, y_tensor].item()
+
+        # Max logit over all incorrect classes
+        # Mask out the true class index
+        num_classes = logits.shape[1]
+        mask = torch.ones(num_classes, dtype=torch.bool, device=self.device)
+        mask[y_tensor] = False
+        max_other = logits[0, mask].max().item()
+
+        # Margin: logit_true - max_other
+        margin = float(logit_true - max_other)
+        return margin
 
 
-# ---------------------------------------------------------------------
-# FGSM-style adversarial intervention
-# ---------------------------------------------------------------------
+
 class AdversarialFGSMIntervention:
     """
     Simple FGSM adversarial intervention driven by a single reference model.
