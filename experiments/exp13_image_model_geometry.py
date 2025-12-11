@@ -1,0 +1,440 @@
+# experiments/exp13_image_model_geometry.py
+#
+# Exp 13: 2D convex-hull geometry of PIER in model-output space.
+#
+# For a chosen target model (e.g., ShapeResNet50_ShapeResNet), and for each
+# context ("texture_natural" vs "shape_bias"), we:
+#   1) Build P_fit as in Exp11 (same max_samples_per_context and fit_fraction).
+#   2) For each model in the ecosystem, collect a scalar output vector on P_fit:
+#        v_j = [g_j(x_1), ..., g_j(x_N)]^T
+#      where g_j is whatever scalar ImageModelWrapper returns
+#      (p_true, margin, etc.).
+#   3) For the target, form y_t = v_target, and peers matrix Y_P = [v_p1, ..., v_pk].
+#      Use DISCOSolver to find the optimal convex combination w_hat.
+#      Define v_mix = sum_j w_hat_j * v_pj.
+#   4) Stack all peer vectors, v_target, v_mix into a matrix X and apply PCA to 2D.
+#   5) In 2D, compute the convex hull of peer points, and save:
+#        - 2D coordinates of all models + mix
+#        - peer mask, hull vertices, target index, mix index, w_hat, etc.
+#
+# The plotting is done in the companion notebook 13_model_geometry_convex_hull.ipynb.
+
+import os
+import sys
+from typing import List, Tuple, Dict, Optional
+
+import numpy as np
+
+import torch
+import torch.nn as nn
+from torchvision import datasets, transforms, models
+
+# Make local package importable
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(ROOT_DIR)
+
+from isqed.geometry import DISCOSolver
+from isqed.real_world import ImageModelWrapper
+
+SCALAR_MODE = "p_true"
+
+
+# ============================================================
+# 0. Wrapper (scalar output) and basic transforms
+# ============================================================
+
+
+
+
+def build_imagenet_transform() -> transforms.Compose:
+    return transforms.Compose(
+        [
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ]
+    )
+
+
+# ============================================================
+# 1. Model loading utilities (reuse from Exp11/12 style)
+# ============================================================
+
+def load_standard_models(device: str) -> Dict[str, ImageModelWrapper]:
+    """
+    Load a small ImageNet ecosystem of standard/high-capacity models.
+
+    All models are wrapped by ImageModelWrapper so that they expose `_forward`.
+    """
+    model_wrappers: Dict[str, ImageModelWrapper] = {}
+
+    # Standard ResNet50
+    res50 = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+    model_wrappers["ResNet50"] = ImageModelWrapper(res50, "ResNet50", device, mode=SCALAR_MODE)
+
+    # EfficientNet-B0
+    eff_b0 = models.efficientnet_b0(
+        weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1
+    )
+    model_wrappers["EfficientNetB0"] = ImageModelWrapper(
+        eff_b0, "EfficientNetB0", device, mode=SCALAR_MODE
+    )
+
+    # ConvNeXt-Tiny
+    convnext_tiny = models.convnext_tiny(
+        weights=models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1
+    )
+    model_wrappers["ConvNeXtTiny"] = ImageModelWrapper(
+        convnext_tiny, "ConvNeXtTiny", device, mode=SCALAR_MODE
+    )
+
+    # ViT-B/16
+    vit_b16 = models.vit_b_16(weights=models.ViT_B_16_Weights.IMAGENET1K_V1)
+    model_wrappers["ViT_B16"] = ImageModelWrapper(vit_b16, "ViT_B16", device, mode=SCALAR_MODE)
+
+    return model_wrappers
+
+
+def load_shape_biased_resnet50(
+    device: str,
+    variant: str = "C",
+) -> ImageModelWrapper:
+    """
+    Load one of the shape-related ResNet-50 variants from Geirhos et al.:
+
+      A: resnet50_trained_on_SIN
+      B: resnet50_trained_on_SIN_and_IN
+      C: resnet50_trained_on_SIN_and_IN_then_finetuned_on_IN
+    """
+    from collections import OrderedDict
+    from torch.hub import load_state_dict_from_url
+
+    model_urls = {
+        "A": (
+            "https://bitbucket.org/robert_geirhos/texture-vs-shape-pretrained-models/"
+            "raw/6f41d2e86fc60566f78de64ecff35cc61eb6436f/"
+            "resnet50_train_60_epochs-c8e5653e.pth.tar"
+        ),
+        "B": (
+            "https://bitbucket.org/robert_geirhos/texture-vs-shape-pretrained-models/"
+            "raw/60b770e128fffcbd8562a3ab3546c1a735432d03/"
+            "resnet50_train_45_epochs_combined_IN_SF-2a0d100e.pth.tar"
+        ),
+        "C": (
+            "https://bitbucket.org/robert_geirhos/texture-vs-shape-pretrained-models/"
+            "raw/60b770e128fffcbd8562a3ab3546c1a735432d03/"
+            "resnet50_finetune_60_epochs_lr_decay_after_30_"
+            "start_resnet50_train_45_epochs_combined_IN_SF-ca06340c.pth.tar"
+        ),
+    }
+
+    if variant not in model_urls:
+        raise ValueError(f"Unknown shape-biased variant '{variant}', use 'A', 'B' or 'C'.")
+
+    backbone = models.resnet50(weights=None)
+    checkpoint = load_state_dict_from_url(model_urls[variant], map_location=device)
+    state_dict = checkpoint["state_dict"]
+
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_k = k[len("module."):] if k.startswith("module.") else k
+        new_state_dict[new_k] = v
+
+    backbone.load_state_dict(new_state_dict)
+    backbone.to(device).eval()
+
+    name = {
+        "A": "ShapeResNet50_SIN",
+        "B": "ShapeResNet50_SININ",
+        "C": "ShapeResNet50_ShapeResNet",
+    }[variant]
+    return ImageModelWrapper(backbone, name, device, mode=SCALAR_MODE)
+
+
+# ============================================================
+# 2. Dataset utilities (copy from Exp11 style)
+# ============================================================
+
+def load_context_samples(
+    root: str,
+    max_samples: int,
+    np_rng: np.random.RandomState,
+    context_name: str,
+):
+    """
+    Load up to `max_samples` images from an ImageFolder root.
+    Returns:
+        samples: list of (x_tensor, y_int)
+        ids:     list of string identifiers (relative file paths)
+    """
+    transform = build_imagenet_transform()
+    dataset = datasets.ImageFolder(root=root, transform=transform)
+
+    n_total = len(dataset)
+    if n_total == 0:
+        raise RuntimeError(f"Context '{context_name}' has no images under {root}.")
+
+    if max_samples is not None and max_samples < n_total:
+        indices = np_rng.choice(n_total, size=max_samples, replace=False)
+    else:
+        indices = np.arange(n_total)
+
+    samples = []
+    ids = []
+    for idx in indices:
+        x, y = dataset[idx]
+        path, _ = dataset.samples[idx]
+        samples.append((x, int(y)))
+        ids.append(os.path.relpath(path, root))
+
+    return samples, ids
+
+
+def split_fit_eval_indices(
+    n: int,
+    np_rng: np.random.RandomState,
+    fit_fraction: float = 0.5,
+):
+    idx = np.arange(n)
+    np_rng.shuffle(idx)
+    n_fit = int(n * fit_fraction)
+    fit_idx = idx[:n_fit]
+    eval_idx = idx[n_fit:]
+    return fit_idx, eval_idx
+
+
+# ============================================================
+# 3. Core geometry experiment
+# ============================================================
+
+def collect_scalar_vector(
+    wrapper: ImageModelWrapper,
+    samples: List[Tuple[torch.Tensor, int]],
+):
+    vals = []
+    for sample in samples:
+        vals.append(wrapper._forward(sample))
+    return np.asarray(vals, dtype=float)
+
+
+def run_model_geometry_experiment(
+    natural_root: str,
+    shape_root: str,
+    target_name: str,
+    shape_variant: Optional[str] = "C",
+    max_samples_per_context: int = 800,
+    fit_fraction: float = 0.5,
+    output_prefix: str = "exp13_geometry",
+):
+    """
+    Run convex-hull geometry experiment for a single target across both contexts:
+      - texture_natural  (using natural_root)
+      - shape_bias       (using shape_root)
+
+    Results are saved as npz files under results/artifacts/.
+    """
+    from sklearn.decomposition import PCA
+    from scipy.spatial import ConvexHull
+
+    print("=== Exp 13: Model-output convex-hull geometry ===")
+
+    np_rng = np.random.RandomState(0)
+    torch.manual_seed(0)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
+    # 1) Load models
+    print("\nLoading standard models...")
+    models_std = load_standard_models(device=device)
+
+    print("Loading shape-biased variants...")
+    models_shape: Dict[str, ImageModelWrapper] = {}
+    if shape_variant is not None:
+        # We still load all A/B/C; target_name will pick one of them.
+        for v in ["A", "B", "C"]:
+            m = load_shape_biased_resnet50(device=device, variant=v)
+            models_shape[m.name] = m
+            print(f"  [OK] Loaded {m.name} (variant {v}).")
+    else:
+        print("  [INFO] shape_variant=None, skipping shape-biased models.")
+
+    all_models: Dict[str, ImageModelWrapper] = {}
+    all_models.update(models_std)
+    all_models.update(models_shape)
+
+    if target_name not in all_models:
+        raise ValueError(
+            f"Target model '{target_name}' not found. Available: {list(all_models.keys())}"
+        )
+
+    # 2) Prepare contexts
+    contexts = [
+        ("texture_natural", natural_root),
+        ("shape_bias", shape_root),
+    ]
+
+    out_dir = os.path.join(ROOT_DIR, "results", "artifacts", "exp13")
+    os.makedirs(out_dir, exist_ok=True)
+
+    for context_name, root in contexts:
+        print(f"\n--- Context: {context_name} (root={root}) ---")
+
+        # 2.1 Load samples and split into P_fit / P_eval (as in Exp11)
+        samples_ctx, ids_ctx = load_context_samples(
+            root=root,
+            max_samples=max_samples_per_context,
+            np_rng=np_rng,
+            context_name=context_name,
+        )
+        n_ctx = len(samples_ctx)
+        fit_idx, eval_idx = split_fit_eval_indices(n_ctx, np_rng, fit_fraction)
+        fit_samples = [samples_ctx[i] for i in fit_idx]
+        fit_ids = [ids_ctx[i] for i in fit_idx]
+
+        print(f"  Using {len(fit_samples)} samples for P_fit (out of {n_ctx}).")
+
+        # 2.2 Collect scalar vectors for all models on P_fit
+        model_names = list(all_models.keys())
+        vectors: Dict[str, np.ndarray] = {}
+        for name in model_names:
+            vec = collect_scalar_vector(all_models[name], fit_samples)
+            vectors[name] = vec
+            # print(f"    Collected vector for {name}: shape={vec.shape}")
+
+        # 2.3 Build target & peers matrices
+        target_vec = vectors[target_name]
+        peers = [name for name in model_names if name != target_name]
+        peer_vecs = [vectors[name] for name in peers]
+
+        y_t_fit_vec = target_vec.reshape(-1, 1)        # (N, 1)
+        Y_p_fit_mat = np.stack(peer_vecs, axis=1)      # (N, num_peers)
+
+        # 2.4 Solve convex weights
+        _, w_hat = DISCOSolver.solve_weights_and_distance(y_t_fit_vec, Y_p_fit_mat)
+        w_hat = np.asarray(w_hat, dtype=float).flatten()
+        print(f"  Learned w_hat (len={len(w_hat)}), first 3 = {w_hat[:3]}")
+
+        # 2.5 Form convex-mix vector
+        v_mix = np.zeros_like(target_vec, dtype=float)
+        for w, v in zip(w_hat, peer_vecs):
+            v_mix += w * v
+
+        # 2.6 PCA to 2D
+        from sklearn.decomposition import PCA
+        from scipy.spatial import ConvexHull
+
+        all_vecs = peer_vecs + [target_vec, v_mix]
+        labels = peers + [target_name, "peer_mix"]
+        X = np.stack(all_vecs, axis=0)  # (num_peers+2, N_fit)
+
+        pca = PCA(n_components=2)
+        coords = pca.fit_transform(X)   # (num_peers+2, 2)
+        explained = pca.explained_variance_ratio_
+
+        peer_coords = coords[:len(peers)]
+        target_coord = coords[len(peers)]
+        mix_coord = coords[len(peers) + 1]
+
+        hull = ConvexHull(peer_coords)
+        hull_vertices = hull.vertices  # indices into peers
+
+        # 2.7 Save npz
+        peer_mask = np.array([i < len(peers) for i in range(len(labels))], dtype=bool)
+        target_idx = len(peers)
+        mix_idx = len(peers) + 1
+
+        out_name = f"{output_prefix}_{target_name}_{context_name}.npz"
+        out_path = os.path.join(out_dir, out_name)
+        np.savez_compressed(
+            out_path,
+            coords=coords,
+            labels=np.array(labels),
+            peer_mask=peer_mask,
+            hull_vertices=hull_vertices,
+            target_idx=target_idx,
+            mix_idx=mix_idx,
+            context=context_name,
+            target_name=target_name,
+            w_hat=w_hat,
+            explained_variance=explained,
+            fit_ids=np.array(fit_ids),
+        )
+        print(f"  Saved geometry to: {out_path}")
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Exp 13: Model-output convex-hull geometry of PIER."
+    )
+    parser.add_argument(
+        "--natural_root",
+        type=str,
+        # required=True,
+        default="/work3/leiyo/imagenet",
+        help="Root of natural ImageNet-like validation images (ImageFolder).",
+    )
+    parser.add_argument(
+        "--shape_root",
+        type=str,
+        # required=True,
+        default="/work3/leiyo/texture-vs-shape/stimuli/style-transfer-preprocessed-512",
+        help="Root of shape-biased cue-conflict / stylized images (ImageFolder).",
+    )
+    parser.add_argument(
+        "--target_model",
+        type=str,
+        default="ShapeResNet50_ShapeResNet",
+        help="Name of the target model (must match one of the loaded models).",
+    )
+    parser.add_argument(
+        "--shape_variant",
+        type=str,
+        default="C",
+        help="Which shape-biased variant(s) to load for ResNet-50: A, B, C or None.",
+    )
+    parser.add_argument(
+        "--max_samples_per_context",
+        type=int,
+        default=800,
+        help="Maximum number of images per context.",
+    )
+    parser.add_argument(
+        "--fit_fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of samples per context used for P_fit.",
+    )
+    parser.add_argument(
+        "--output_prefix",
+        type=str,
+        default="exp13_geometry",
+        help="Prefix for geometry npz files under results/artifacts/.",
+    )
+
+    args = parser.parse_args()
+
+    if args.shape_variant.lower() == "none":
+        shape_variant = None
+    else:
+        shape_variant = args.shape_variant.upper()
+
+    run_model_geometry_experiment(
+        natural_root=args.natural_root,
+        shape_root=args.shape_root,
+        target_name=args.target_model,
+        shape_variant=shape_variant,
+        max_samples_per_context=args.max_samples_per_context,
+        fit_fraction=args.fit_fraction,
+        output_prefix=args.output_prefix,
+    )
+
+
+if __name__ == "__main__":
+    main()
