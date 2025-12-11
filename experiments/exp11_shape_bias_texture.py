@@ -13,7 +13,7 @@
 #      baseline w_hat over the peer models using DISCOSolver.
 #   4) On P_eval, compute PIER = |Y_t - sum_j w_hat[j] * Y_j| and average it.
 #
-# We use logits-based scalar responses g(f_j(x)) defined inside ImageModelWrapperLabelLogit:
+# We use logits-based scalar responses g(f_j(x)) defined inside ImageModelWrapper:
 #   g = (logit_true_class) - max_other_logit
 #
 # Expected qualitative pattern:
@@ -42,7 +42,7 @@ sys.path.append(ROOT_DIR)
 
 from isqed.ecosystem import Ecosystem
 from isqed.geometry import DISCOSolver
-from isqed.real_world import ImageModelWrapperLabelLogit, IdentityIntervention
+from isqed.real_world import ImageModelWrapper, IdentityIntervention
 
 # Import deterministic seed helper
 sys.path.append(os.path.join(ROOT_DIR, "experiments"))
@@ -54,23 +54,23 @@ SCALAR_MODE = "p_true"
 # 1. Model loading utilities
 # ============================================================
 
-def load_standard_models(device: str) -> Dict[str, ImageModelWrapperLabelLogit]:
+def load_standard_models(device: str) -> Dict[str, ImageModelWrapper]:
     """
     Load a small ImageNet ecosystem of standard/high-capacity models.
 
-    All models are wrapped by ImageModelWrapperLabelLogit so that they expose `_forward`.
+    All models are wrapped by ImageModelWrapper so that they expose `_forward`.
     """
-    model_wrappers: Dict[str, ImageModelWrapperLabelLogit] = {}
+    model_wrappers: Dict[str, ImageModelWrapper] = {}
 
     # Standard ResNet50
     res50 = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-    model_wrappers["ResNet50"] = ImageModelWrapperLabelLogit(res50, "ResNet50", device, mode=SCALAR_MODE)
+    model_wrappers["ResNet50"] = ImageModelWrapper(res50, "ResNet50", device, mode=SCALAR_MODE)
 
     # EfficientNet-B0
     eff_b0 = models.efficientnet_b0(
         weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1
     )
-    model_wrappers["EfficientNetB0"] = ImageModelWrapperLabelLogit(
+    model_wrappers["EfficientNetB0"] = ImageModelWrapper(
         eff_b0, "EfficientNetB0", device, mode=SCALAR_MODE
     )
 
@@ -78,13 +78,13 @@ def load_standard_models(device: str) -> Dict[str, ImageModelWrapperLabelLogit]:
     convnext_tiny = models.convnext_tiny(
         weights=models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1
     )
-    model_wrappers["ConvNeXtTiny"] = ImageModelWrapperLabelLogit(
+    model_wrappers["ConvNeXtTiny"] = ImageModelWrapper(
         convnext_tiny, "ConvNeXtTiny", device, mode=SCALAR_MODE
     )
 
     # ViT-B/16
     vit_b16 = models.vit_b_16(weights=models.ViT_B_16_Weights.IMAGENET1K_V1)
-    model_wrappers["ViT_B16"] = ImageModelWrapperLabelLogit(vit_b16, "ViT_B16", device, mode=SCALAR_MODE)
+    model_wrappers["ViT_B16"] = ImageModelWrapper(vit_b16, "ViT_B16", device, mode=SCALAR_MODE)
 
     return model_wrappers
 
@@ -92,7 +92,7 @@ def load_standard_models(device: str) -> Dict[str, ImageModelWrapperLabelLogit]:
 def load_shape_biased_resnet50(
     device: str,
     variant: str = "C",
-) -> ImageModelWrapperLabelLogit:
+) -> ImageModelWrapper:
     """
     Load one of the shape-related ResNet-50 variants from Geirhos et al.:
 
@@ -142,7 +142,7 @@ def load_shape_biased_resnet50(
         "B": "ShapeResNet50_SININ",
         "C": "ShapeResNet50_ShapeResNet",
     }[variant]
-    return ImageModelWrapperLabelLogit(backbone, name, device, mode=SCALAR_MODE)
+    return ImageModelWrapper(backbone, name, device, mode=SCALAR_MODE)
 
 
 # ============================================================
@@ -250,14 +250,14 @@ def run_shape_texture_experiment(
 
     print("Loading shape-biased ResNet50 variants (SIN / SIN+IN / SIN+IN→IN)...")
     shape_variants = ["A", "B", "C"]
-    models_shape: Dict[str, ImageModelWrapperLabelLogit] = {}
+    models_shape: Dict[str, ImageModelWrapper] = {}
     for v in shape_variants:
         m = load_shape_biased_resnet50(device=device, variant=v)
         models_shape[m.name] = m
         print(f"  [OK] Loaded {m.name} (variant {v}).")
 
     # Combine into ecosystem: standard models + all three shape-biased variants
-    all_models: Dict[str, ImageModelWrapperLabelLogit] = {}
+    all_models: Dict[str, ImageModelWrapper] = {}
     all_models.update(models_std)
     all_models.update(models_shape)
 

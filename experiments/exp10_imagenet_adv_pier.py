@@ -52,7 +52,7 @@ import torchvision.models as tv_models
 # Ensure we can import the local `isqed` package
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from isqed.geometry import DISCOSolver
-from isqed.real_world import ImageModelWrapperLogitMargin, AdversarialFGSMIntervention
+from isqed.real_world import ImageModelWrapper, AdversarialFGSMIntervention
 from torch.hub import download_url_to_file
 
 
@@ -68,6 +68,8 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 
 DOSES_FIT = np.linspace(0.0, 0.1, 6)
 DOSES_EVAL = np.linspace(0.0, 0.1, 6)
+
+SCALAR_MODE = "tanh_margin"  # Use tanh_margin for normalized outputs
 
 
 # ---------------------------------------------------------------------
@@ -179,20 +181,20 @@ def split_fit_eval(
 # ---------------------------------------------------------------------
 # 4. Model loaders
 # ---------------------------------------------------------------------
-def load_standard_models(device: str) -> List[ImageModelWrapperLogitMargin]:
+def load_standard_models(device: str) -> List[ImageModelWrapper]:
     """
     Load a set of standard ImageNet models from torchvision.
 
     We keep at least 5 models in total. One of them (ResNet-50) will also
     serve as the adversarial reference model.
     """
-    models: List[ImageModelWrapperLogitMargin] = []
+    models: List[ImageModelWrapper] = []
 
     # ResNet-18
     try:
         weights = tv_models.ResNet18_Weights.IMAGENET1K_V1
         resnet18 = tv_models.resnet18(weights=weights)
-        models.append(ImageModelWrapperLogitMargin(resnet18, "ResNet18", device))
+        models.append(ImageModelWrapper(resnet18, "ResNet18", device, mode=SCALAR_MODE))
         print("  [OK] Loaded ResNet18.")
     except Exception as e:
         print(f"  [FAIL] ResNet18: {e}")
@@ -201,7 +203,7 @@ def load_standard_models(device: str) -> List[ImageModelWrapperLogitMargin]:
     try:
         weights = tv_models.ResNet50_Weights.IMAGENET1K_V2
         resnet50 = tv_models.resnet50(weights=weights)
-        models.append(ImageModelWrapperLogitMargin(resnet50, "ResNet50", device))
+        models.append(ImageModelWrapper(resnet50, "ResNet50", device, mode=SCALAR_MODE))
         print("  [OK] Loaded ResNet50.")
     except Exception as e:
         print(f"  [FAIL] ResNet50: {e}")
@@ -210,7 +212,7 @@ def load_standard_models(device: str) -> List[ImageModelWrapperLogitMargin]:
     try:
         weights = tv_models.EfficientNet_B0_Weights.IMAGENET1K_V1
         effnet_b0 = tv_models.efficientnet_b0(weights=weights)
-        models.append(ImageModelWrapperLogitMargin(effnet_b0, "EfficientNetB0", device))
+        models.append(ImageModelWrapper(effnet_b0, "EfficientNetB0", device, mode=SCALAR_MODE))
         print("  [OK] Loaded EfficientNetB0.")
     except Exception as e:
         print(f"  [FAIL] EfficientNetB0: {e}")
@@ -219,7 +221,7 @@ def load_standard_models(device: str) -> List[ImageModelWrapperLogitMargin]:
     try:
         weights = tv_models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1
         convnext_t = tv_models.convnext_tiny(weights=weights)
-        models.append(ImageModelWrapperLogitMargin(convnext_t, "ConvNeXtTiny", device))
+        models.append(ImageModelWrapper(convnext_t, "ConvNeXtTiny", device, mode=SCALAR_MODE))
         print("  [OK] Loaded ConvNeXtTiny.")
     except Exception as e:
         print(f"  [FAIL] ConvNeXtTiny: {e}")
@@ -228,7 +230,7 @@ def load_standard_models(device: str) -> List[ImageModelWrapperLogitMargin]:
     try:
         weights = tv_models.ViT_B_16_Weights.IMAGENET1K_V1
         vit_b16 = tv_models.vit_b_16(weights=weights)
-        models.append(ImageModelWrapperLogitMargin(vit_b16, "ViT_B16", device))
+        models.append(ImageModelWrapper(vit_b16, "ViT_B16", device, mode=SCALAR_MODE))
         print("  [OK] Loaded ViT_B16.")
     except Exception as e:
         print(f"  [FAIL] ViT_B16: {e}")
@@ -239,7 +241,7 @@ def load_standard_models(device: str) -> List[ImageModelWrapperLogitMargin]:
 def load_robust_resnet50(
     device: str,
     robust_ckpt: Optional[str],
-) -> Optional[ImageModelWrapperLogitMargin]:
+) -> Optional[ImageModelWrapper]:
     """
     Optionally load an adversarially trained ResNet-50.
 
@@ -270,7 +272,7 @@ def load_robust_resnet50(
                 new_state_dict[k] = v
         base_model.load_state_dict(new_state_dict, strict=False)
         print("  [OK] Loaded robust ResNet-50 from checkpoint.")
-        return ImageModelWrapperLogitMargin(base_model, "RobustResNet50", device)
+        return ImageModelWrapper(base_model, "RobustResNet50", device, mode=SCALAR_MODE)
     except Exception as e:
         print(f"  [FAIL] Robust ResNet-50: {e}")
         return None

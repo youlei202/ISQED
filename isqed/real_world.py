@@ -73,53 +73,8 @@ class MaskingIntervention(Intervention):
                 words[i] = self.mask_token
         return " ".join(words)
 
-class ImageModelWrapperLogitMargin:
-    """
-    Lightweight wrapper around a torchvision image classifier.
 
-    The wrapper takes as input a tuple (x, y):
-      - x: tensor of shape (3, H, W), already normalized
-      - y: integer class label (ImageNet index)
-
-    It outputs a scalar **margin** for the true class:
-        g(x) = logit_y_true(x) - max_{k != y_true} logit_k(x)
-
-    This is a single real number (scalar), consistent with the paper's
-    definition Y_j(x, θ) ∈ ℝ, but more informative than p(correct)
-    when analysing adversarial robustness.
-    """
-
-    def __init__(self, model: nn.Module, name: str, device: str):
-        self.model = model.to(device)
-        self.model.eval()
-        self.name = name
-        self.device = device
-
-    @torch.no_grad()
-    def _forward(self, sample: Tuple[torch.Tensor, int]) -> float:
-        x, y = sample
-        x = x.to(self.device)
-        y_tensor = torch.tensor([y], device=self.device, dtype=torch.long)
-
-        # Forward pass
-        logits = self.model(x.unsqueeze(0))  # shape: (1, num_classes)
-
-        # True-class logit
-        logit_true = logits[0, y_tensor].item()
-
-        # Max logit over all incorrect classes
-        # Mask out the true class index
-        num_classes = logits.shape[1]
-        mask = torch.ones(num_classes, dtype=torch.bool, device=self.device)
-        mask[y_tensor] = False
-        max_other = logits[0, mask].max().item()
-
-        # Margin: logit_true - max_other
-        margin = float(logit_true - max_other)
-        return margin
-
-
-class ImageModelWrapperLabelLogit:
+class ImageModelWrapper:
     """
     Lightweight wrapper around a torchvision image classifier.
 
