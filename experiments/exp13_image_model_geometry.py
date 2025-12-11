@@ -231,11 +231,11 @@ def run_model_geometry_experiment(
     output_prefix: str = "exp13_geometry",
 ):
     """
-    Run convex-hull geometry experiment for a single target across both contexts:
-      - texture_natural  (using natural_root)
-      - shape_bias       (using shape_root)
+    Run convex-hull geometry experiment.
 
-    Results are saved as npz files under results/artifacts/.
+    If target_name == "ALL", we will treat *every* model in the ecosystem as
+    a target (one by one) and save a geometry npz for each (per context).
+    Otherwise, only run for the specified target model.
     """
     from sklearn.decomposition import PCA
     from scipy.spatial import ConvexHull
@@ -255,7 +255,7 @@ def run_model_geometry_experiment(
     print("Loading shape-biased variants...")
     models_shape: Dict[str, ImageModelWrapper] = {}
     if shape_variant is not None:
-        # We still load all A/B/C; target_name will pick one of them.
+        # We still load all A/B/C; target candidates will include all of them.
         for v in ["A", "B", "C"]:
             m = load_shape_biased_resnet50(device=device, variant=v)
             models_shape[m.name] = m
@@ -267,10 +267,17 @@ def run_model_geometry_experiment(
     all_models.update(models_std)
     all_models.update(models_shape)
 
-    if target_name not in all_models:
-        raise ValueError(
-            f"Target model '{target_name}' not found. Available: {list(all_models.keys())}"
-        )
+    # Decide which models to treat as targets
+    if target_name.upper() == "ALL":
+        target_names = list(all_models.keys())
+        print(f"\n[INFO] Running geometry for ALL models as targets: {target_names}")
+    else:
+        if target_name not in all_models:
+            raise ValueError(
+                f"Target model '{target_name}' not found. Available: {list(all_models.keys())}"
+            )
+        target_names = [target_name]
+        print(f"\n[INFO] Running geometry only for target: {target_name}")
 
     # 2) Prepare contexts
     contexts = [
@@ -298,73 +305,72 @@ def run_model_geometry_experiment(
 
         print(f"  Using {len(fit_samples)} samples for P_fit (out of {n_ctx}).")
 
-        # 2.2 Collect scalar vectors for all models on P_fit
+        # 2.2 Collect scalar vectors for all models on P_fit (一次性算好，供所有 target 使用)
         model_names = list(all_models.keys())
         vectors: Dict[str, np.ndarray] = {}
         for name in model_names:
             vec = collect_scalar_vector(all_models[name], fit_samples)
             vectors[name] = vec
-            # print(f"    Collected vector for {name}: shape={vec.shape}")
 
-        # 2.3 Build target & peers matrices
-        target_vec = vectors[target_name]
-        peers = [name for name in model_names if name != target_name]
-        peer_vecs = [vectors[name] for name in peers]
+        # 3) For each chosen target, run convex-hull geometry
+        for t_name in target_names:
+            print(f"\n  >> Target: {t_name} (context={context_name})")
 
-        y_t_fit_vec = target_vec.reshape(-1, 1)        # (N, 1)
-        Y_p_fit_mat = np.stack(peer_vecs, axis=1)      # (N, num_peers)
+            target_vec = vectors[t_name]
+            peers = [name for name in model_names if name != t_name]
+            peer_vecs = [vectors[name] for name in peers]
 
-        # 2.4 Solve convex weights
-        _, w_hat = DISCOSolver.solve_weights_and_distance(y_t_fit_vec, Y_p_fit_mat)
-        w_hat = np.asarray(w_hat, dtype=float).flatten()
-        print(f"  Learned w_hat (len={len(w_hat)}), first 3 = {w_hat[:3]}")
+            y_t_fit_vec = target_vec.reshape(-1, 1)        # (N, 1)
+            Y_p_fit_mat = np.stack(peer_vecs, axis=1)      # (N, num_peers)
 
-        # 2.5 Form convex-mix vector
-        v_mix = np.zeros_like(target_vec, dtype=float)
-        for w, v in zip(w_hat, peer_vecs):
-            v_mix += w * v
+            # 3.1 Solve convex weights
+            _, w_hat = DISCOSolver.solve_weights_and_distance(y_t_fit_vec, Y_p_fit_mat)
+            w_hat = np.asarray(w_hat, dtype=float).flatten()
+            print(f"    Learned w_hat (len={len(w_hat)}), first 3 = {w_hat[:3]}")
 
-        # 2.6 PCA to 2D
-        from sklearn.decomposition import PCA
-        from scipy.spatial import ConvexHull
+            # 3.2 Form convex-mix vector
+            v_mix = np.zeros_like(target_vec, dtype=float)
+            for w, v in zip(w_hat, peer_vecs):
+                v_mix += w * v
 
-        all_vecs = peer_vecs + [target_vec, v_mix]
-        labels = peers + [target_name, "peer_mix"]
-        X = np.stack(all_vecs, axis=0)  # (num_peers+2, N_fit)
+            # 3.3 PCA to 2D
+            all_vecs = peer_vecs + [target_vec, v_mix]
+            labels = peers + [t_name, "peer_mix"]
+            X = np.stack(all_vecs, axis=0)  # (num_peers+2, N_fit)
 
-        pca = PCA(n_components=2)
-        coords = pca.fit_transform(X)   # (num_peers+2, 2)
-        explained = pca.explained_variance_ratio_
+            pca = PCA(n_components=2)
+            coords = pca.fit_transform(X)   # (num_peers+2, 2)
+            explained = pca.explained_variance_ratio_
 
-        peer_coords = coords[:len(peers)]
-        target_coord = coords[len(peers)]
-        mix_coord = coords[len(peers) + 1]
+            peer_coords = coords[:len(peers)]
+            target_coord = coords[len(peers)]
+            mix_coord = coords[len(peers) + 1]
 
-        hull = ConvexHull(peer_coords)
-        hull_vertices = hull.vertices  # indices into peers
+            hull = ConvexHull(peer_coords)
+            hull_vertices = hull.vertices  # indices into peers
 
-        # 2.7 Save npz
-        peer_mask = np.array([i < len(peers) for i in range(len(labels))], dtype=bool)
-        target_idx = len(peers)
-        mix_idx = len(peers) + 1
+            # 3.4 Save npz
+            peer_mask = np.array([i < len(peers) for i in range(len(labels))], dtype=bool)
+            target_idx = len(peers)
+            mix_idx = len(peers) + 1
 
-        out_name = f"{output_prefix}_{target_name}_{context_name}.npz"
-        out_path = os.path.join(out_dir, out_name)
-        np.savez_compressed(
-            out_path,
-            coords=coords,
-            labels=np.array(labels),
-            peer_mask=peer_mask,
-            hull_vertices=hull_vertices,
-            target_idx=target_idx,
-            mix_idx=mix_idx,
-            context=context_name,
-            target_name=target_name,
-            w_hat=w_hat,
-            explained_variance=explained,
-            fit_ids=np.array(fit_ids),
-        )
-        print(f"  Saved geometry to: {out_path}")
+            out_name = f"{output_prefix}_{t_name}_{context_name}.npz"
+            out_path = os.path.join(out_dir, out_name)
+            np.savez_compressed(
+                out_path,
+                coords=coords,
+                labels=np.array(labels),
+                peer_mask=peer_mask,
+                hull_vertices=hull_vertices,
+                target_idx=target_idx,
+                mix_idx=mix_idx,
+                context=context_name,
+                target_name=t_name,
+                w_hat=w_hat,
+                explained_variance=explained,
+                fit_ids=np.array(fit_ids),
+            )
+            print(f"    Saved geometry to: {out_path}")
 
 
 def main():
@@ -390,8 +396,8 @@ def main():
     parser.add_argument(
         "--target_model",
         type=str,
-        default="ShapeResNet50_ShapeResNet",
-        help="Name of the target model (must match one of the loaded models).",
+        default="ALL",
+        help="Target model name, or 'ALL' to run geometry for every model.",
     )
     parser.add_argument(
         "--shape_variant",
