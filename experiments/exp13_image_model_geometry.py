@@ -2,22 +2,28 @@
 #
 # Exp 13: 2D convex-hull geometry of PIER in model-output space.
 #
-# For a chosen target model (e.g., ShapeResNet50_ShapeResNet), and for each
-# context ("texture_natural" vs "shape_bias"), we:
-#   1) Build P_fit as in Exp11 (same max_samples_per_context and fit_fraction).
-#   2) For each model in the ecosystem, collect a scalar output vector on P_fit:
-#        v_j = [g_j(x_1), ..., g_j(x_N)]^T
-#      where g_j is whatever scalar ImageModelWrapper returns
-#      (p_true, margin, etc.).
-#   3) For the target, form y_t = v_target, and peers matrix Y_P = [v_p1, ..., v_pk].
-#      Use DISCOSolver to find the optimal convex combination w_hat.
-#      Define v_mix = sum_j w_hat_j * v_pj.
-#   4) Stack all peer vectors, v_target, v_mix into a matrix X and apply PCA to 2D.
-#   5) In 2D, compute the convex hull of peer points, and save:
-#        - 2D coordinates of all models + mix
-#        - peer mask, hull vertices, target index, mix index, w_hat, etc.
+# Setting (aligned with Exp12):
+#   - We consider three small ecosystems:
+#       Ecosystem A: {ResNet50, EfficientNetB0, ConvNeXtTiny, ViT_B16, ShapeResNet50_SIN}
+#       Ecosystem B: {ResNet50, EfficientNetB0, ConvNeXtTiny, ViT_B16, ShapeResNet50_SININ}
+#       Ecosystem C: {ResNet50, EfficientNetB0, ConvNeXtTiny, ViT_B16, ShapeResNet50_ShapeResNet}
+#   - In each ecosystem, the *only* target is the corresponding shape-biased model
+#     (A, B, or C). The four standard models always act as peers.
 #
-# The plotting is done in the companion notebook 13_model_geometry_convex_hull.ipynb.
+#   - For each ecosystem and each context ("texture_natural" vs "shape_bias"), we:
+#       1) Build P_fit as in Exp11 (same max_samples_per_context and fit_fraction).
+#       2) For each model in the ecosystem, collect a scalar output vector on P_fit:
+#            v_j = [g_j(x_1), ..., g_j(x_N)]^T
+#          where g_j is the scalar returned by ImageModelWrapper (e.g. p_true).
+#       3) For the target, form y_t = v_target, and peers matrix Y_P = [v_p1, ..., v_p4].
+#          Use DISCOSolver to find the optimal convex combination w_hat.
+#          Define v_mix = sum_j w_hat_j * v_pj.
+#       4) Stack all peer vectors, v_target, v_mix into a matrix X and apply PCA to 2D.
+#       5) In 2D, compute the convex hull of peer points, and save:
+#            - 2D coordinates of all models + mix
+#            - peer mask, hull vertices, target index, mix index, w_hat, etc.
+#
+# The plotting is done in the companion notebook 13_image_model_geometry.ipynb.
 
 import os
 import sys
@@ -36,15 +42,12 @@ sys.path.append(ROOT_DIR)
 from isqed.geometry import DISCOSolver
 from isqed.real_world import ImageModelWrapper
 
-SCALAR_MODE = "p_true"
+SCALAR_MODE = "p_true"  # or "margin", depending on how your ImageModelWrapper is implemented
 
 
 # ============================================================
-# 0. Wrapper (scalar output) and basic transforms
+# 0. Preprocessing
 # ============================================================
-
-
-
 
 def build_imagenet_transform() -> transforms.Compose:
     return transforms.Compose(
@@ -61,7 +64,7 @@ def build_imagenet_transform() -> transforms.Compose:
 
 
 # ============================================================
-# 1. Model loading utilities (reuse from Exp11/12 style)
+# 1. Model loading utilities
 # ============================================================
 
 def load_standard_models(device: str) -> Dict[str, ImageModelWrapper]:
@@ -101,7 +104,7 @@ def load_standard_models(device: str) -> Dict[str, ImageModelWrapper]:
 
 def load_shape_biased_resnet50(
     device: str,
-    variant: str = "C",
+    variant: str,
 ) -> ImageModelWrapper:
     """
     Load one of the shape-related ResNet-50 variants from Geirhos et al.:
@@ -156,7 +159,7 @@ def load_shape_biased_resnet50(
 
 
 # ============================================================
-# 2. Dataset utilities (copy from Exp11 style)
+# 2. Dataset utilities
 # ============================================================
 
 def load_context_samples(
@@ -224,23 +227,24 @@ def collect_scalar_vector(
 def run_model_geometry_experiment(
     natural_root: str,
     shape_root: str,
-    target_name: str,
-    shape_variant: Optional[str] = "C",
     max_samples_per_context: int = 800,
     fit_fraction: float = 0.5,
     output_prefix: str = "exp13_geometry",
 ):
     """
-    Run convex-hull geometry experiment.
+    Run convex-hull geometry experiment for three ecosystems:
 
-    If target_name == "ALL", we will treat *every* model in the ecosystem as
-    a target (one by one) and save a geometry npz for each (per context).
-    Otherwise, only run for the specified target model.
+      Ecosystem A: target ShapeResNet50_SIN, peers = standard models
+      Ecosystem B: target ShapeResNet50_SININ, peers = standard models
+      Ecosystem C: target ShapeResNet50_ShapeResNet, peers = standard models
+
+    For each ecosystem and each context (texture_natural / shape_bias),
+    saves an npz under results/artifacts/exp13/.
     """
     from sklearn.decomposition import PCA
     from scipy.spatial import ConvexHull
 
-    print("=== Exp 13: Model-output convex-hull geometry ===")
+    print("=== Exp 13: Model-output convex-hull geometry (A/B/C ecosystems) ===")
 
     np_rng = np.random.RandomState(0)
     torch.manual_seed(0)
@@ -248,36 +252,14 @@ def run_model_geometry_experiment(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # 1) Load models
+    # 1) Load standard models once
     print("\nLoading standard models...")
     models_std = load_standard_models(device=device)
+    standard_names = list(models_std.keys())
+    print(f"  Standard models: {standard_names}")
 
-    print("Loading shape-biased variants...")
-    models_shape: Dict[str, ImageModelWrapper] = {}
-    if shape_variant is not None:
-        # We still load all A/B/C; target candidates will include all of them.
-        for v in ["A", "B", "C"]:
-            m = load_shape_biased_resnet50(device=device, variant=v)
-            models_shape[m.name] = m
-            print(f"  [OK] Loaded {m.name} (variant {v}).")
-    else:
-        print("  [INFO] shape_variant=None, skipping shape-biased models.")
-
-    all_models: Dict[str, ImageModelWrapper] = {}
-    all_models.update(models_std)
-    all_models.update(models_shape)
-
-    # Decide which models to treat as targets
-    if target_name.upper() == "ALL":
-        target_names = list(all_models.keys())
-        print(f"\n[INFO] Running geometry for ALL models as targets: {target_names}")
-    else:
-        if target_name not in all_models:
-            raise ValueError(
-                f"Target model '{target_name}' not found. Available: {list(all_models.keys())}"
-            )
-        target_names = [target_name]
-        print(f"\n[INFO] Running geometry only for target: {target_name}")
+    # Shape variants A/B/C
+    shape_variants = ["A", "B", "C"]
 
     # 2) Prepare contexts
     contexts = [
@@ -288,10 +270,10 @@ def run_model_geometry_experiment(
     out_dir = os.path.join(ROOT_DIR, "results", "artifacts", "exp13")
     os.makedirs(out_dir, exist_ok=True)
 
+    # Pre-load datasets and P_fit splits once per context (shared across ecosystems)
+    contexts_cache = {}
     for context_name, root in contexts:
-        print(f"\n--- Context: {context_name} (root={root}) ---")
-
-        # 2.1 Load samples and split into P_fit / P_eval (as in Exp11)
+        print(f"\n[Data] Pre-loading context: {context_name} from {root}")
         samples_ctx, ids_ctx = load_context_samples(
             root=root,
             max_samples=max_samples_per_context,
@@ -305,37 +287,65 @@ def run_model_geometry_experiment(
 
         print(f"  Using {len(fit_samples)} samples for P_fit (out of {n_ctx}).")
 
-        # 2.2 Collect scalar vectors for all models on P_fit (一次性算好，供所有 target 使用)
-        model_names = list(all_models.keys())
-        vectors: Dict[str, np.ndarray] = {}
-        for name in model_names:
-            vec = collect_scalar_vector(all_models[name], fit_samples)
-            vectors[name] = vec
+        contexts_cache[context_name] = {
+            "fit_samples": fit_samples,
+            "fit_ids": fit_ids,
+            "n_ctx": n_ctx,
+        }
 
-        # 3) For each chosen target, run convex-hull geometry
-        for t_name in target_names:
-            print(f"\n  >> Target: {t_name} (context={context_name})")
+    # 3) For each shape variant ecosystem
+    for variant in shape_variants:
+        print(f"\n==============================")
+        print(f"=== Ecosystem variant {variant} ===")
+        print(f"==============================")
 
-            target_vec = vectors[t_name]
-            peers = [name for name in model_names if name != t_name]
+        # load corresponding shape model
+        shape_model = load_shape_biased_resnet50(device=device, variant=variant)
+        target_name = shape_model.name
+
+        # ecosystem models: 4 standard + this shape model
+        eco_models: Dict[str, ImageModelWrapper] = {}
+        eco_models.update(models_std)
+        eco_models[target_name] = shape_model
+
+        peers = standard_names  # peers are always the standard models
+
+        for context_name, _root in contexts:
+            cache = contexts_cache[context_name]
+            fit_samples = cache["fit_samples"]
+            fit_ids = cache["fit_ids"]
+            n_ctx = cache["n_ctx"]
+
+            print(f"\n  [Context={context_name}] Target={target_name}, peers={peers}")
+
+            # 3.1 Collect scalar vectors for peers + target on P_fit
+            vectors: Dict[str, np.ndarray] = {}
+            for name in peers + [target_name]:
+                vec = collect_scalar_vector(eco_models[name], fit_samples)
+                vectors[name] = vec
+
+            target_vec = vectors[target_name]
             peer_vecs = [vectors[name] for name in peers]
 
             y_t_fit_vec = target_vec.reshape(-1, 1)        # (N, 1)
             Y_p_fit_mat = np.stack(peer_vecs, axis=1)      # (N, num_peers)
 
-            # 3.1 Solve convex weights
+            # 3.2 Solve convex weights
             _, w_hat = DISCOSolver.solve_weights_and_distance(y_t_fit_vec, Y_p_fit_mat)
             w_hat = np.asarray(w_hat, dtype=float).flatten()
             print(f"    Learned w_hat (len={len(w_hat)}), first 3 = {w_hat[:3]}")
 
-            # 3.2 Form convex-mix vector
+            # 3.3 Form convex-mix vector
             v_mix = np.zeros_like(target_vec, dtype=float)
             for w, v in zip(w_hat, peer_vecs):
                 v_mix += w * v
 
-            # 3.3 PCA to 2D
+            # High dimension L2 distance
+            l2_dist = float(np.linalg.norm(target_vec - v_mix))
+
+            # 3.4 PCA to 2D
             all_vecs = peer_vecs + [target_vec, v_mix]
-            labels = peers + [t_name, "peer_mix"]
+            labels = peers + [target_name, "peer_mix"]
             X = np.stack(all_vecs, axis=0)  # (num_peers+2, N_fit)
 
             pca = PCA(n_components=2)
@@ -349,12 +359,12 @@ def run_model_geometry_experiment(
             hull = ConvexHull(peer_coords)
             hull_vertices = hull.vertices  # indices into peers
 
-            # 3.4 Save npz
+            # 3.5 Save npz
             peer_mask = np.array([i < len(peers) for i in range(len(labels))], dtype=bool)
             target_idx = len(peers)
             mix_idx = len(peers) + 1
 
-            out_name = f"{output_prefix}_{t_name}_{context_name}.npz"
+            out_name = f"{output_prefix}_{target_name}_{context_name}.npz"
             out_path = os.path.join(out_dir, out_name)
             np.savez_compressed(
                 out_path,
@@ -365,11 +375,14 @@ def run_model_geometry_experiment(
                 target_idx=target_idx,
                 mix_idx=mix_idx,
                 context=context_name,
-                target_name=t_name,
+                target_name=target_name,
                 w_hat=w_hat,
                 explained_variance=explained,
                 fit_ids=np.array(fit_ids),
+                peers=np.array(peers),
+                l2_dist=l2_dist,   
             )
+
             print(f"    Saved geometry to: {out_path}")
 
 
@@ -377,33 +390,19 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Exp 13: Model-output convex-hull geometry of PIER."
+        description="Exp 13: Model-output convex-hull geometry of PIER (A/B/C ecosystems)."
     )
     parser.add_argument(
         "--natural_root",
         type=str,
-        # required=True,
         default="/work3/leiyo/imagenet",
         help="Root of natural ImageNet-like validation images (ImageFolder).",
     )
     parser.add_argument(
         "--shape_root",
         type=str,
-        # required=True,
         default="/work3/leiyo/texture-vs-shape/stimuli/style-transfer-preprocessed-512",
         help="Root of shape-biased cue-conflict / stylized images (ImageFolder).",
-    )
-    parser.add_argument(
-        "--target_model",
-        type=str,
-        default="ALL",
-        help="Target model name, or 'ALL' to run geometry for every model.",
-    )
-    parser.add_argument(
-        "--shape_variant",
-        type=str,
-        default="C",
-        help="Which shape-biased variant(s) to load for ResNet-50: A, B, C or None.",
     )
     parser.add_argument(
         "--max_samples_per_context",
@@ -421,21 +420,14 @@ def main():
         "--output_prefix",
         type=str,
         default="exp13_geometry",
-        help="Prefix for geometry npz files under results/artifacts/.",
+        help="Prefix for geometry npz files under results/artifacts/exp13/.",
     )
 
     args = parser.parse_args()
 
-    if args.shape_variant.lower() == "none":
-        shape_variant = None
-    else:
-        shape_variant = args.shape_variant.upper()
-
     run_model_geometry_experiment(
         natural_root=args.natural_root,
         shape_root=args.shape_root,
-        target_name=args.target_model,
-        shape_variant=shape_variant,
         max_samples_per_context=args.max_samples_per_context,
         fit_fraction=args.fit_fraction,
         output_prefix=args.output_prefix,
