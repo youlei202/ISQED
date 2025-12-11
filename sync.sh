@@ -1,1 +1,3 @@
-scp -r leiyo@login1.hpc.dtu.dk:/zhome/b2/8/197929/GitHub/ISQED-Prototype/results/tables/* ./results/tables/
+#!/bin/bash
+scp -r "leiyo@login1.hpc.dtu.dk:/zhome/b2/8/197929/GitHub/ISQED-Prototype/results/tables/*" "./results/tables/"
+scp -r leiyo@login1.hpc.dtu.dk:/zhome/b2/8/197929/GitHub/ISQED-Prototype/results/artifacts/* ./results/artifacts/

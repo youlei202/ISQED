@@ -403,6 +403,16 @@ def run_shape_texture_experiment(
                 eval_Theta_arr = np.asarray(eval_Theta, dtype=float)
                 y_mix_eval = Y_p_eval @ w_hat
                 residuals_all = np.abs(y_t_eval - y_mix_eval)
+                res_dir = os.path.join(ROOT_DIR, "results", "artifacts", "exp12")
+                os.makedirs(res_dir, exist_ok=True)
+                res_file = f"exp12_{context_name}_{target_name}_residuals.npz"
+                res_path = os.path.join(res_dir, res_file)
+
+                np.savez_compressed(
+                    res_path,
+                    residuals=residuals_all,
+                    thetas=np.asarray(eval_Theta, dtype=float),
+                )
 
                 for theta in DOSES:
                     mask = np.isclose(eval_Theta_arr, float(theta), atol=1e-8)
