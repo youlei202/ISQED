@@ -42,7 +42,7 @@ sys.path.append(ROOT_DIR)
 
 from isqed.ecosystem import Ecosystem
 from isqed.geometry import DISCOSolver
-from isqed.real_world import ImageModelWrapper, IdentityIntervention
+from isqed.real_world import ImageModelWrapper, ImageIdentityIntervention
 
 # Import deterministic seed helper
 sys.path.append(os.path.join(ROOT_DIR, "experiments"))
@@ -270,7 +270,7 @@ def run_shape_texture_experiment(
         ("shape_bias", shape_root),
     ]
 
-    intervention = IdentityIntervention()
+    intervention = ImageIdentityIntervention()
     DOSES = [0.0]  # single theta = 0 (no intervention)
 
     rows = []

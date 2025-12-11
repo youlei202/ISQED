@@ -210,7 +210,7 @@ class AdversarialFGSMIntervention:
         return (x_adv, y)
     
 
-class IdentityIntervention:
+class ImageIdentityIntervention:
     """
     Identity intervention for images.
 
@@ -220,3 +220,34 @@ class IdentityIntervention:
 
     def apply(self, sample: Tuple[torch.Tensor, int], theta: float, seed: int = 0):
         return sample
+    
+
+class TabularModelWrapper:
+    """
+    Lightweight wrapper around a scikit-learn regression model.
+
+    Input to `_forward` is a 1D numpy array x of shape (D,).
+    The output is a scalar prediction y_hat in R.
+    """
+
+    def __init__(self, model, name: str):
+        self.model = model
+        self.name = name
+
+    def _forward(self, x: np.ndarray) -> float:
+        if not isinstance(x, np.ndarray):
+            x = np.asarray(x, dtype=float)
+        x_2d = x.reshape(1, -1)
+        y_hat = self.model.predict(x_2d)[0]
+        return float(y_hat)
+
+
+class TabularIdentityIntervention:
+    """
+    Identity intervention for tabular data.
+
+    It ignores theta and seed and simply returns the original feature vector.
+    """
+
+    def apply(self, x: np.ndarray, theta: float, seed: int = 0) -> np.ndarray:
+        return x
