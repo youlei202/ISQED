@@ -42,69 +42,13 @@ sys.path.append(ROOT_DIR)
 
 from isqed.ecosystem import Ecosystem
 from isqed.geometry import DISCOSolver
+from isqed.real_world import ImageModelWrapperLabelLogit, IdentityIntervention
 
 # Import deterministic seed helper
 sys.path.append(os.path.join(ROOT_DIR, "experiments"))
 from experiments.utils import make_stable_seed
 
-
-# ============================================================
-# 0. Image wrapper and identity intervention
-# ============================================================
-
-try:
-    # If you already moved ImageModelWrapperLabelLogit into a shared module, reuse it.
-    from isqed.real_world import ImageModelWrapperLabelLogit  # type: ignore
-except Exception:
-    class ImageModelWrapperLabelLogit:
-        """
-        Lightweight wrapper around a torchvision image classifier.
-
-        Input to `_forward` is a tuple (x, y):
-          - x: tensor of shape (3, H, W), already normalized
-          - y: integer label (class index)
-
-        Output is a scalar margin:
-            g(f(x)) = logit_y - max_{k != y} logit_k
-        """
-
-        def __init__(self, model: nn.Module, name: str, device: str):
-            self.model = model.to(device)
-            self.model.eval()
-            self.name = name
-            self.device = device
-
-        @torch.no_grad()
-        def _forward(self, sample: Tuple[torch.Tensor, int]) -> float:
-            x, y = sample
-            x = x.to(self.device)
-            y_int = int(y)
-
-            logits = self.model(x.unsqueeze(0))  # (1, C)
-            logits = logits[0]  # (C,)
-
-            if logits.ndim != 1:
-                logits = logits.view(-1)
-
-            logit_y = logits[y_int].item()
-            mask = torch.ones_like(logits, dtype=torch.bool)
-            mask[y_int] = False
-            max_other = logits[mask].max().item()
-
-            margin = float(logit_y - max_other)
-            return margin
-
-
-class IdentityIntervention:
-    """
-    Identity intervention for images.
-
-    It ignores theta and seed and simply returns the original (x, y) pair.
-    This lets us reuse the DISCO / Ecosystem machinery with theta = 0.
-    """
-
-    def apply(self, sample: Tuple[torch.Tensor, int], theta: float, seed: int = 0):
-        return sample
+SCALAR_MODE = "p_true"
 
 
 # ============================================================
@@ -121,14 +65,14 @@ def load_standard_models(device: str) -> Dict[str, ImageModelWrapperLabelLogit]:
 
     # Standard ResNet50
     res50 = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-    model_wrappers["ResNet50"] = ImageModelWrapperLabelLogit(res50, "ResNet50", device)
+    model_wrappers["ResNet50"] = ImageModelWrapperLabelLogit(res50, "ResNet50", device, mode=SCALAR_MODE)
 
     # EfficientNet-B0
     eff_b0 = models.efficientnet_b0(
         weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1
     )
     model_wrappers["EfficientNetB0"] = ImageModelWrapperLabelLogit(
-        eff_b0, "EfficientNetB0", device
+        eff_b0, "EfficientNetB0", device, mode=SCALAR_MODE
     )
 
     # ConvNeXt-Tiny
@@ -136,12 +80,12 @@ def load_standard_models(device: str) -> Dict[str, ImageModelWrapperLabelLogit]:
         weights=models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1
     )
     model_wrappers["ConvNeXtTiny"] = ImageModelWrapperLabelLogit(
-        convnext_tiny, "ConvNeXtTiny", device
+        convnext_tiny, "ConvNeXtTiny", device, mode=SCALAR_MODE
     )
 
     # ViT-B/16
     vit_b16 = models.vit_b_16(weights=models.ViT_B_16_Weights.IMAGENET1K_V1)
-    model_wrappers["ViT_B16"] = ImageModelWrapperLabelLogit(vit_b16, "ViT_B16", device)
+    model_wrappers["ViT_B16"] = ImageModelWrapperLabelLogit(vit_b16, "ViT_B16", device, mode=SCALAR_MODE)
 
     return model_wrappers
 
@@ -199,7 +143,7 @@ def load_shape_biased_resnet50(
         "B": "ShapeResNet50_SININ",
         "C": "ShapeResNet50_ShapeResNet",
     }[variant]
-    return ImageModelWrapperLabelLogit(backbone, name, device)
+    return ImageModelWrapperLabelLogit(backbone, name, device, mode=SCALAR_MODE)
 
 
 # ============================================================

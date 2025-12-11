@@ -253,3 +253,15 @@ class AdversarialFGSMIntervention:
 
         x_adv = x_adv.detach().squeeze(0).cpu()
         return (x_adv, y)
+    
+
+class IdentityIntervention:
+    """
+    Identity intervention for images.
+
+    It ignores theta and seed and simply returns the original (x, y) pair.
+    This lets us reuse the DISCO / Ecosystem machinery with theta = 0.
+    """
+
+    def apply(self, sample: Tuple[torch.Tensor, int], theta: float, seed: int = 0):
+        return sample
