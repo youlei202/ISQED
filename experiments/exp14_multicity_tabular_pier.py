@@ -382,9 +382,26 @@ def run_multicity_tabular_experiment(
         print(f"\n[LOAD] Global model from cache: {global_path}")
     else:
         print("\nTraining global model on all selected cities...")
+        # Train global model on all selected cities' training data (capped at 500k samples)
         X_train_global = np.concatenate([city_data[c]["train"][0] for c in city_models.keys()], axis=0)
         y_train_global = np.concatenate([city_data[c]["train"][1] for c in city_models.keys()], axis=0)
-        global_model = train_regressor(X_train_global, y_train_global, seed=global_seed, model_params=model_params)
+
+        # Cap global training size for speed/stability
+        max_global_train = 500_000
+        n_global = X_train_global.shape[0]
+        if n_global > max_global_train:
+            # Reproducible subsampling
+            idx = rng.choice(n_global, size=max_global_train, replace=False)
+            X_train_global = X_train_global[idx]
+            y_train_global = y_train_global[idx]
+            print(f"[Global] Subsampled global train set: {n_global} -> {max_global_train}")
+        else:
+            print(f"[Global] Using full global train set: {n_global}")
+
+        global_model = train_regressor(
+            X_train_global, y_train_global, seed=global_seed, model_params=model_params
+        )
+
         joblib.dump(global_model, global_path)
         print(f"[DUMP] Global model saved to: {global_path}")
 
