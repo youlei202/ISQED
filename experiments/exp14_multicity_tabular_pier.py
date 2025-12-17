@@ -39,7 +39,13 @@
 #
 # Outputs:
 #   results/tables/exp14_multicity_tabular_summary.csv
-#   Per city: local/global/router MAE, PIER, deltas, persistence baseline, and ratios.
+#   results/tables/<output>_peer_weights_long.csv
+#
+# New additions (for downstream "fleet governance" analysis):
+#   - Save peer convex weights in long format (City, PeerName, Weight, Rank).
+#   - Add weight concentration diagnostics (entropy, effective peers, top-k mass).
+#   - Add pairwise differencing baselines (closest peer distance, mean pairwise distance).
+#   - Save FitDistance returned by DISCOSolver for debugging.
 
 import os
 import sys
@@ -62,16 +68,17 @@ import joblib
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
+DATA_DIR = os.environ.get("UTD19_DIR", "/work3/leiyo/utd19")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DEFAULT_UTD19_CSV = os.path.join(DATA_DIR, "utd19_u.csv")
+
 from isqed.geometry import DISCOSolver
 
 
 # -----------------------------------------------------------------------------
 # 0) Defaults and determinism
 # -----------------------------------------------------------------------------
-DEFAULT_DATA_DIR = os.environ.get("UTD19_DIR", "/work3/leiyo/utd19")
-DEFAULT_UTD19_CSV = os.path.join(DEFAULT_DATA_DIR, "utd19_u.csv")
-
-
 def set_global_seed(seed: int = 0) -> np.random.RandomState:
     """Fix all relevant RNG seeds for reproducibility."""
     rng = np.random.RandomState(seed)
@@ -204,7 +211,7 @@ def prepare_utd19_for_exp14(
       - feature_cols list
     """
     if lag_steps is None:
-        lag_steps = [1, 2, 3, 6, 12]
+        lag_steps = [1, 2, 3, 6]
 
     if horizon_steps <= 0:
         raise ValueError("horizon_steps must be a positive integer.")
@@ -256,7 +263,6 @@ def prepare_utd19_for_exp14(
     df["dow_cos"] = np.cos(2.0 * np.pi * df["dow"] / 7.0)
 
     # Time-of-day features from interval:
-    # Normalize by per-city max interval + 1 to be robust across cities.
     interval_max = df.groupby(city_col)[interval_col].transform("max")
     interval_period = (interval_max + 1.0).replace(0.0, 1.0)
     tod_frac = (df[interval_col] / interval_period).clip(0.0, 1.0)
@@ -392,7 +398,7 @@ def router_mae_chunked(
 ) -> float:
     """
     Compute router MAE on potentially huge test sets without building an (n, P) matrix.
-    Router prediction: y_pred = sum_k w_k * peer_k.predict(X).
+    y_pred = sum_k w_k * peer_k.predict(X)
 
     Only peers with weights > weight_tol are evaluated for efficiency.
     """
@@ -403,7 +409,6 @@ def router_mae_chunked(
     w_hat = np.asarray(w_hat, dtype=float).flatten()
     keep = np.where(w_hat > float(weight_tol))[0]
     if keep.size == 0:
-        # Degenerate case: no positive weights. Return MAE of zeros as a fallback.
         return float(np.mean(np.abs(y_test - 0.0)))
 
     peer_models_kept = [peer_models[i] for i in keep.tolist()]
@@ -425,6 +430,54 @@ def router_mae_chunked(
 
 
 # -----------------------------------------------------------------------------
+# 4.5) Weight diagnostics (new)
+# -----------------------------------------------------------------------------
+def weight_entropy(w: np.ndarray, eps: float = 1e-12) -> float:
+    """Shannon entropy of a nonnegative weight vector normalized to sum to 1."""
+    w = np.asarray(w, dtype=float).flatten()
+    s = float(w.sum())
+    if s <= 0:
+        return float("nan")
+    w = np.clip(w / s, 0.0, 1.0)
+    return float(-np.sum(w * np.log(w + eps)))
+
+
+def weight_entropy_norm(w: np.ndarray, eps: float = 1e-12) -> float:
+    """Entropy normalized by log(P), in [0,1] for a proper distribution."""
+    w = np.asarray(w, dtype=float).flatten()
+    p = int(w.size)
+    if p <= 1:
+        return 0.0
+    H = weight_entropy(w, eps=eps)
+    return float(H / np.log(p))
+
+
+def effective_peers_hhi(w: np.ndarray, eps: float = 1e-12) -> float:
+    """Effective number of peers via inverse Herfindahl index: 1 / sum w_i^2."""
+    w = np.asarray(w, dtype=float).flatten()
+    s = float(w.sum())
+    if s <= 0:
+        return float("nan")
+    w = np.clip(w / s, 0.0, 1.0)
+    denom = float(np.sum(w * w))
+    return float(1.0 / max(denom, eps))
+
+
+def topk_peers(peer_names: List[str], w_hat: np.ndarray, k: int = 3) -> Dict[str, object]:
+    """Return top-k peer names/weights and concentration stats."""
+    w = np.asarray(w_hat, dtype=float).flatten()
+    order = np.argsort(-w)
+    out: Dict[str, object] = {}
+    for r in range(min(k, len(order))):
+        i = int(order[r])
+        out[f"TopPeer{r+1}"] = str(peer_names[i])
+        out[f"TopPeer{r+1}Weight"] = float(w[i])
+    out["TopKMass3"] = float(np.sum(w[order[: min(3, len(order))]]))
+    out["NumNonZeroWeights"] = int(np.sum(w > 1e-12))
+    return out
+
+
+# -----------------------------------------------------------------------------
 # 5) Main experiment
 # -----------------------------------------------------------------------------
 def run_multicity_tabular_experiment(
@@ -439,6 +492,9 @@ def run_multicity_tabular_experiment(
     error_col: str = "error",
     target_col: str = "y",
     split_col: str = "split",
+    train_split_name: str = "train",
+    val_split_name: str = "val",
+    test_split_name: str = "test",
     max_cities: Optional[int] = 40,
     min_train_samples: int = 5000,
     min_val_samples: int = 2000,
@@ -472,7 +528,6 @@ def run_multicity_tabular_experiment(
         lag_steps = [1, 2, 3, 6, 12]
 
     # Model hyperparameters (part of cache key)
-    # Tuned for speed and reasonable performance on large tabular time-series features.
     if str(model_type).lower().strip() == "histgb":
         model_params = dict(
             max_iter=300,
@@ -483,7 +538,6 @@ def run_multicity_tabular_experiment(
             l2_regularization=0.0,
         )
     else:
-        # GBRT is slower for large datasets; keep it as an optional fallback.
         model_params = dict(
             n_estimators=300,
             max_depth=3,
@@ -493,18 +547,9 @@ def run_multicity_tabular_experiment(
 
     # Define experiment config that determines cached models
     exp_cfg = dict(
-        version="exp14_utd19_forecasting_v2",
+        version="exp14_utd19_forecasting_v2_weights",
         seed=global_seed,
         data_csv=os.path.abspath(data_csv),
-        city_col=city_col,
-        detid_col=detid_col,
-        day_col=day_col,
-        interval_col=interval_col,
-        flow_col=flow_col,
-        occ_col=occ_col,
-        error_col=error_col,
-        target_definition=f"y(t)=flow(t+{int(horizon_steps)}) within (city,detid) sorted by (day,interval)",
-        split="per-(city,detid) 60/20/20 time-ordered with horizon buffer",
         horizon_steps=int(horizon_steps),
         lag_steps=[int(x) for x in lag_steps],
         filter_error=bool(filter_error),
@@ -575,9 +620,7 @@ def run_multicity_tabular_experiment(
             min_points_per_detector=int(min_points_per_detector),
         )
     else:
-        # Prepared input must have engineered features; we infer feature columns minimally.
         print("Detected prepared CSV (has 'y' and 'split'). Using it directly.")
-        # Try to reconstruct feature columns from expected names.
         base = [interval_col, flow_col, occ_col, "tod_sin", "tod_cos", "dow_sin", "dow_cos", "is_weekend", "flow_diff1"]
         lag_steps_unique = sorted(set(int(x) for x in lag_steps))
         feature_cols = base + [f"flow_lag{l}" for l in lag_steps_unique] + [f"occ_lag{l}" for l in lag_steps_unique]
@@ -601,9 +644,9 @@ def run_multicity_tabular_experiment(
     for city in all_cities:
         df_city = df[df[city_col] == city]
 
-        df_train = df_city[df_city[split_col] == "train"]
-        df_val = df_city[df_city[split_col] == "val"]
-        df_test = df_city[df_city[split_col] == "test"]
+        df_train = df_city[df_city[split_col] == train_split_name]
+        df_val = df_city[df_city[split_col] == val_split_name]
+        df_test = df_city[df_city[split_col] == test_split_name]
 
         # Optional row caps for speed
         df_train = _cap_df_rows(df_train, max_train_rows_per_city, rng)
@@ -667,7 +710,6 @@ def run_multicity_tabular_experiment(
         X_train_global = np.concatenate([city_data[c]["train"][0] for c in model_names_sorted], axis=0)
         y_train_global = np.concatenate([city_data[c]["train"][1] for c in model_names_sorted], axis=0)
 
-        # Cap global training size for speed/stability
         max_global_train = 800_000
         n_global = int(X_train_global.shape[0])
         if n_global > max_global_train:
@@ -688,13 +730,21 @@ def run_multicity_tabular_experiment(
         joblib.dump(global_model, global_path)
         print(f"[DUMP] Global model saved to: {global_path}")
 
+    # 7) Prepare output paths
+    out_dir = os.path.join(ROOT_DIR, "results", "tables")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, output_filename)
+
+    weights_long_filename = output_filename.replace(".csv", "_peer_weights_long.csv")
+    weights_long_path = os.path.join(out_dir, weights_long_filename)
+
     # Locate the index of current-flow feature for persistence baseline
-    if flow_col not in feature_cols:
-        raise ValueError(f"Flow column '{flow_col}' not found in feature_cols.")
     flow_idx = feature_cols.index(flow_col)
 
-    # 7) Evaluate each city
+    # 8) Evaluate each city + save weights
     rows = []
+    weight_rows = []
+
     for city in model_names_sorted:
         print(f"\n=== City: {city} ===")
 
@@ -707,8 +757,6 @@ def run_multicity_tabular_experiment(
         # Train-set diagnostics
         local_train_mae = float(mean_absolute_error(y_train, local_model.predict(X_train)))
         global_train_mae = float(mean_absolute_error(y_train, global_model.predict(X_train)))
-        print(f"  Train MAE (local):  {local_train_mae:.4f}")
-        print(f"  Train MAE (global): {global_train_mae:.4f}")
 
         # Test-set baselines
         local_pred = local_model.predict(X_test)
@@ -716,8 +764,6 @@ def run_multicity_tabular_experiment(
 
         local_mae = float(mean_absolute_error(y_test, local_pred))
         global_mae = float(mean_absolute_error(y_test, global_pred))
-        print(f"  Test  MAE (local):  {local_mae:.4f}")
-        print(f"  Test  MAE (global): {global_mae:.4f}")
 
         # Naive persistence baseline: y_hat(t+h) = flow(t)
         persist_pred = X_test[:, flow_idx]
@@ -725,16 +771,13 @@ def run_multicity_tabular_experiment(
 
         mean_flow = float(np.mean(y_test))
         local_mae_ratio = float(local_mae / mean_flow) if mean_flow > 0 else float("nan")
-
-        skill_vs_persist = (
-            float((persist_mae - local_mae) / persist_mae) if persist_mae > 0 else float("nan")
-        )
+        skill_vs_persist = float((persist_mae - local_mae) / persist_mae) if persist_mae > 0 else float("nan")
 
         # Peer set: GLOBAL + other cities
         peer_names = ["GLOBAL"] + [c for c in model_names_sorted if c != city]
         peer_models = [global_model] + [city_models[c] for c in model_names_sorted if c != city]
 
-        # Fit convex weights on validation subset (target outputs, not labels)
+        # ---- Fit convex weights on VAL subset (label-free fit using target outputs) ----
         n_val = int(X_val.shape[0])
         fit_idx = np.arange(n_val)
         rng.shuffle(fit_idx)
@@ -742,16 +785,34 @@ def run_multicity_tabular_experiment(
             fit_idx = fit_idx[: int(max_fit_samples)]
 
         X_fit = X_val[fit_idx]
-        y_t_fit = local_model.predict(X_fit).reshape(-1, 1)  # (n_fit, 1)
-        Y_p_fit = predict_matrix(peer_models, X_fit)         # (n_fit, P)
+        y_t_fit = local_model.predict(X_fit).reshape(-1, 1)
+        Y_p_fit = predict_matrix(peer_models, X_fit)
 
-        _, w_hat = DISCOSolver.solve_weights_and_distance(y_t_fit, Y_p_fit)
+        fit_dist, w_hat = DISCOSolver.solve_weights_and_distance(y_t_fit, Y_p_fit)
         w_hat = np.asarray(w_hat, dtype=float).flatten()
 
-        topk = np.argsort(-w_hat)[:5]
-        print(f"  [Fit] Top-5 peer weights: {[ (peer_names[i], float(w_hat[i])) for i in topk ]}")
+        # Save weights (long format)
+        order = np.argsort(-w_hat)
+        for rank, idx_peer in enumerate(order, start=1):
+            weight_rows.append(
+                {
+                    "City": city,
+                    "PeerName": str(peer_names[int(idx_peer)]),
+                    "Weight": float(w_hat[int(idx_peer)]),
+                    "Rank": int(rank),
+                    "HorizonSteps": int(horizon_steps),
+                    "CacheHash": cfg_hash,
+                    "ModelType": str(model_type),
+                }
+            )
 
-        # PIER on test subset (target vs convex peers)
+        # Weight diagnostics
+        H = weight_entropy(w_hat)
+        Hn = weight_entropy_norm(w_hat)
+        neff = effective_peers_hhi(w_hat)
+        top_info = topk_peers(peer_names, w_hat, k=3)
+
+        # ---- PIER on TEST subset (label-free residual using fixed w_hat) ----
         n_test = int(X_test.shape[0])
         eval_idx = np.arange(n_test)
         rng.shuffle(eval_idx)
@@ -759,12 +820,20 @@ def run_multicity_tabular_experiment(
             eval_idx = eval_idx[: int(max_eval_samples)]
 
         X_eval = X_test[eval_idx]
-        y_t_eval = local_model.predict(X_eval)          # (n_eval,)
-        Y_p_eval = predict_matrix(peer_models, X_eval)  # (n_eval, P)
+        y_t_eval = local_model.predict(X_eval)
+        Y_p_eval = predict_matrix(peer_models, X_eval)
         y_mix_eval = Y_p_eval @ w_hat
         pier_city = float(np.mean(np.abs(y_t_eval - y_mix_eval)))
 
-        # Router MAE on full test (or capped test) set, chunked
+        # Pairwise differencing baselines (same eval subset)
+        abs_diffs = np.abs(Y_p_eval - y_t_eval[:, None])  # (n_eval, P)
+        mean_abs_diff_per_peer = abs_diffs.mean(axis=0)   # (P,)
+        pairwise_mean = float(mean_abs_diff_per_peer.mean())
+        closest_idx = int(np.argmin(mean_abs_diff_per_peer))
+        closest_peer_name = str(peer_names[closest_idx])
+        closest_peer_diff = float(mean_abs_diff_per_peer[closest_idx])
+
+        # Router MAE on full test set (chunked)
         router_mae = router_mae_chunked(
             peer_models=peer_models,
             w_hat=w_hat,
@@ -777,31 +846,36 @@ def run_multicity_tabular_experiment(
         delta_global = float(global_mae - local_mae)
         delta_router = float(router_mae - local_mae)
 
-        print(f"  Persist MAE: {persist_mae:.4f} | Skill vs persist: {skill_vs_persist:.4f}")
-        print(f"  MeanFlow(Test): {mean_flow:.4f} | Local MAE ratio: {local_mae_ratio:.4f}")
-        print(f"  PIER (target vs convex peers): {pier_city:.4f}")
-        print(f"  Router MAE (chunked): {router_mae:.4f} (Δ vs local = {delta_router:.4f})")
+        topk_dbg = [(peer_names[i], float(w_hat[i])) for i in np.argsort(-w_hat)[:5]]
+        print(f"  Local_MAE={local_mae:.4f} | Global_MAE={global_mae:.4f} | Router_MAE={router_mae:.4f}")
+        print(f"  ΔGlobal={delta_global:.4f} | ΔRouter={delta_router:.4f} | PIER={pier_city:.4f} | FitDist={float(fit_dist):.4f}")
+        print(f"  Top-5 peer weights: {topk_dbg}")
 
         rows.append(
             {
                 "City": city,
                 "HorizonSteps": int(horizon_steps),
-                # summary statistics
                 "MeanFlow_Test": mean_flow,
                 "Local_MAE_Ratio": local_mae_ratio,
                 "Persist_MAE": persist_mae,
                 "Skill_vs_Persist": skill_vs_persist,
-                # train metrics
                 "Local_Train_MAE": local_train_mae,
                 "Global_Train_MAE": global_train_mae,
-                # test metrics
                 "Local_MAE": local_mae,
                 "Global_MAE": global_mae,
                 "Router_MAE": router_mae,
                 "Delta_Global": delta_global,
                 "Delta_Router": delta_router,
-                # PIER
                 "PIER": pier_city,
+                # new diagnostics
+                "FitDistance": float(fit_dist),
+                "PairwiseMeanAbsDiff": pairwise_mean,
+                "ClosestPeerName": closest_peer_name,
+                "ClosestPeerMeanAbsDiff": closest_peer_diff,
+                "WeightEntropy": float(H),
+                "WeightEntropyNorm": float(Hn),
+                "EffectivePeers_HHI": float(neff),
+                **top_info,
                 # sizes
                 "NumTrain": int(X_train.shape[0]),
                 "NumVal": int(X_val.shape[0]),
@@ -809,22 +883,20 @@ def run_multicity_tabular_experiment(
                 "NumFitSamples": int(len(fit_idx)),
                 "NumEvalSamples": int(len(eval_idx)),
                 "NumPeers": int(len(peer_models)),
-                # cache / reproducibility
+                # cache info
                 "CacheHash": cfg_hash,
                 "ModelType": str(model_type),
             }
         )
 
-    if not rows:
-        raise RuntimeError("No results to save (unexpected).")
-
     summary_df = pd.DataFrame(rows)
-    out_dir = os.path.join(ROOT_DIR, "results", "tables")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, output_filename)
     summary_df.to_csv(out_path, index=False)
-
     print(f"\nSaved summary to: {out_path}")
+
+    weights_df = pd.DataFrame(weight_rows)
+    weights_df.to_csv(weights_long_path, index=False)
+    print(f"Saved peer weights (long format) to: {weights_long_path}")
+
     print(f"Model cache dir: {cache_dir}")
     print("Done.")
 
@@ -839,13 +911,13 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Exp 14: UTD19 multi-city forecasting-aware PIER vs replacement cost (with caching)."
+        description="Exp 14: UTD19 multi-city forecasting-aware PIER vs replacement cost (with caching + weight diagnostics)."
     )
     parser.add_argument(
         "--data_dir",
         type=str,
-        default=DEFAULT_DATA_DIR,
-        help=f"Directory for UTD19 files and model cache (default: {DEFAULT_DATA_DIR}).",
+        default=DATA_DIR,
+        help=f"Directory for UTD19 files and model cache (default: {DATA_DIR}).",
     )
     parser.add_argument(
         "--data_csv",
@@ -868,7 +940,7 @@ def main():
     parser.add_argument(
         "--lag_steps",
         type=str,
-        default="1,2,3,6,12",
+        default="1,2,3,6",
         help="Comma-separated lag steps for features (default: 1,2,3,6,12).",
     )
     parser.add_argument(
@@ -879,19 +951,19 @@ def main():
     parser.add_argument(
         "--max_days_per_city",
         type=int,
-        default=60,
+        default=None,
         help="Keep only the most recent N days per city (None disables).",
     )
     parser.add_argument(
         "--max_detectors_per_city",
         type=int,
-        default=200,
+        default=500,
         help="Keep only the top-K detectors per city by observation count (None disables).",
     )
     parser.add_argument(
         "--min_points_per_detector",
         type=int,
-        default=5000,
+        default=1000,
         help="Drop detectors with fewer than this many raw observations (before lags/target).",
     )
     parser.add_argument(
