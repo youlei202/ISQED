@@ -68,8 +68,9 @@ import joblib
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
-DATA_DIR = os.environ.get("UTD19_DIR", "/work3/leiyo/utd19")
-os.makedirs(DATA_DIR, exist_ok=True)
+# DATA_DIR = os.environ.get("UTD19_DIR", "/home/leiyo/work3/leiyo/utd19")
+DATA_DIR = os.path.abspath("/home/leiyo/work3/leiyo/utd19")
+# os.makedirs(DATA_DIR, exist_ok=True)
 
 DEFAULT_UTD19_CSV = os.path.join(DATA_DIR, "utd19_u.csv")
 
