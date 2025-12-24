@@ -105,7 +105,7 @@ def run_bert_experiment():
         targets.append(
             {
                 "model": near_distil,
-                "name": "Parametric Divergence (Variant)",
+                "name": "Parametric Divergence (Finetuned)",
                 "type": "Uniqueness",
             }
         )
