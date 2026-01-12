@@ -211,3 +211,5 @@ __marimo__/
 .history
 results/
 experiments/checkpoints/
+runs/physics_experiment_1/events.out.tfevents.1768223604.hwlab-x235-pc-1000.19356.0
+runs/physics_experiment_1/events.out.tfevents.1768223649.hwlab-x235-pc-1000.20779.0
