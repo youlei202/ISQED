@@ -395,13 +395,13 @@ def main():
     parser.add_argument(
         "--natural_root",
         type=str,
-        default="~/work3/leiyo/imagenet",
+        default="~/work3/username/imagenet",
         help="Root of natural ImageNet-like validation images (ImageFolder).",
     )
     parser.add_argument(
         "--shape_root",
         type=str,
-        default="~/work3/leiyo/texture-vs-shape/stimuli/style-transfer-preprocessed-512",
+        default="~/work3/username/texture-vs-shape/stimuli/style-transfer-preprocessed-512",
         help="Root of shape-biased cue-conflict / stylized images (ImageFolder).",
     )
     parser.add_argument(

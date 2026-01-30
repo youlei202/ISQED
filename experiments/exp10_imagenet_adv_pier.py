@@ -457,7 +457,7 @@ def main():
         "--data_root",
         type=str,
         # required=True,
-        default="/work3/leiyo/imagenet",
+        default="/work3/username/imagenet",
         help="Path to ImageNet-style folder (ImageFolder) with images.",
     )
     parser.add_argument(
